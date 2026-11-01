@@ -6,12 +6,16 @@ Object.assign(IC, {
   lock: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
 });
 S.libTab = 'instances';
-S.srv = { status: {}, filter: 'all', browse: false };
+S.srv = { status: {}, filter: 'all', view: 'mine', disc: { list: [], next: '', loading: false, loaded: false, err: '', q: '', sort: 'players', country: '', hideEmpty: false, tok: 0 } };
+const SD_COUNTRIES = [['', 'Any country'], ['US', 'United States'], ['GB', 'United Kingdom'], ['DE', 'Germany'], ['FR', 'France'], ['CA', 'Canada'], ['BR', 'Brazil'], ['AU', 'Australia'], ['NL', 'Netherlands'], ['PL', 'Poland'], ['ES', 'Spain'], ['IT', 'Italy'], ['RU', 'Russia'], ['TR', 'Turkey'], ['MX', 'Mexico'], ['JP', 'Japan'], ['KR', 'South Korea'], ['IN', 'India'], ['SG', 'Singapore'], ['TH', 'Thailand'], ['ID', 'Indonesia'], ['PH', 'Philippines'], ['VN', 'Vietnam'], ['SE', 'Sweden'], ['FI', 'Finland'], ['AR', 'Argentina'], ['CL', 'Chile'], ['UA', 'Ukraine'], ['PT', 'Portugal'], ['CZ', 'Czechia'], ['RO', 'Romania']];
 S.host = { list: [], sel: null, tab: 'over', logs: {}, net: {}, test: {}, howto: false, netT: 0 };
 const CURATED = [
   { name: 'Hypixel', host: 'mc.hypixel.net' }, { name: 'Wynncraft', host: 'play.wynncraft.com' }, { name: 'CubeCraft', host: 'play.cubecraft.net' },
   { name: '2b2t', host: '2b2t.org' }, { name: 'MCC Island', host: 'play.mccisland.net' }, { name: 'Minemen Club', host: 'na.minemen.club' },
-  { name: 'PikaNetwork', host: 'play.pika-network.net' }, { name: 'ManaCube', host: 'play.manacube.com' },
+  { name: 'PikaNetwork', host: 'play.pika-network.net' }, { name: 'ManaCube', host: 'play.manacube.com' }, { name: 'Minehut', host: 'play.minehut.gg' },
+  { name: 'Complex Gaming', host: 'hub.mc-complex.com' }, { name: 'Mineland', host: 'mineland.net' }, { name: 'Jartex Network', host: 'play.jartexnetwork.com' },
+  { name: 'GommeHD', host: 'gommehd.net' }, { name: 'Funcraft', host: 'play.funcraft.net' }, { name: 'DogCraft', host: 'dogcraft.net' },
+  { name: 'Simply Vanilla', host: 'play.simplyvanilla.net' }, { name: 'Mush', host: 'mush.com.br' },
 ];
 const libSeg = () => `<div class="seg" data-key="libseg"><button class="${S.libTab !== 'servers' ? 'on' : ''}" data-hact="libtab" data-v="instances">Instances</button><button class="${S.libTab === 'servers' ? 'on' : ''}" data-hact="libtab" data-v="servers">Servers</button></div>`;
 const srvKey = (h, p) => h + ':' + (p || '');
@@ -19,8 +23,8 @@ function parseAddr(s) { s = String(s || '').trim().replace(/^[a-z]+:\/\//i, '').
 function srvEntries() {
   const saved = (S.settings.servers || []).map(s => ({ ...s, kind: 'saved' })), have = new Set(saved.map(s => srvKey(s.host, s.port)));
   const mine = (S.host.list || []).map(h => ({ id: 'host:' + h.id, name: h.name, host: 'localhost', port: parseInt((h.props || {})['server-port']) || 25565, kind: 'hosted' }));
-  const cur = S.srv.browse ? CURATED.filter(c => !have.has(srvKey(c.host, 0))).map(c => ({ ...c, id: 'cur:' + c.host, port: 0, kind: 'curated' })) : [];
-  return [...mine, ...saved, ...cur];
+  if (S.srv.view === 'disc') { const D = S.srv.disc; return D.list.length || !D.err ? D.list.map(x => ({ ...x, kind: 'disc' })) : CURATED.map(c => ({ ...c, id: 'cur:' + c.host, port: 0, kind: 'curated' })); }
+  return [...mine, ...saved];
 }
 let srvRaf = 0;
 function schedSrvRender() { if (srvRaf) return; srvRaf = requestAnimationFrame(() => { srvRaf = 0; if (S.page === 'library' && S.libTab === 'servers') render(); }); }
@@ -28,32 +32,70 @@ async function srvRefresh(force) {
   const now = Date.now(), todo = srvEntries().filter(e => { const st = S.srv.status[srvKey(e.host, e.port)]; return force || !st || (st.state !== 'loading' && now - st.t > 90000); }); if (!todo.length) return;
   todo.forEach(e => { const k = srvKey(e.host, e.port); S.srv.status[k] = { ...(S.srv.status[k] || {}), state: 'loading', t: now }; });
   let i = 0; const worker = async () => { while (i < todo.length) { const e = todo[i++], k = srvKey(e.host, e.port); let r; try { r = await call('serverStatus', { host: e.host, port: e.port }); } catch { r = { online: false }; } S.srv.status[k] = { ...r, state: 'done', t: Date.now() }; schedSrvRender(); } };
-  await Promise.all([worker(), worker(), worker(), worker()]);
+  await Promise.all(Array.from({ length: 10 }, worker));
 }
 function srvCard(e, st, ms) {
   const up = !!st.online, loading = st.state === 'loading' && st.online === undefined, need = up && st.mode === 'online' && !ms;
   const mode = !up ? '' : st.mode === 'online' ? `<span class="badge-m ms">${ic('lock')}Microsoft only</span>` : st.mode === 'offline' ? '<span class="badge-m off">Offline OK</span>' : '<span class="badge-m unk">Mode unknown</span>';
   const fav = st.favicon ? `<img class="pimg" data-l="${letter(e.name)}" src="${esc(st.favicon)}" width="56" height="56" style="image-rendering:pixelated">` : letter(e.name);
-  const btn = e.kind === 'curated' ? `<button class="btn" data-hact="scur" data-host="${esc(e.host)}" data-name="${esc(e.name)}">${ic('plus')}Add</button>` : e.kind === 'saved' ? `<button class="btn icon" data-hact="srem" data-id="${esc(e.id)}" data-tip="Remove">${ic('trash')}</button>` : '';
+  const btn = e.kind === 'disc' ? `<button class="btn" data-hact="sdadd" data-host="${esc(e.host)}" data-port="${e.port || 0}" data-name="${esc(e.name)}">${ic('plus')}Add</button>` : e.kind === 'curated' ? `<button class="btn" data-hact="scur" data-host="${esc(e.host)}" data-name="${esc(e.name)}">${ic('plus')}Add</button>` : e.kind === 'saved' ? `<button class="btn icon" data-hact="srem" data-id="${esc(e.id)}" data-tip="Remove">${ic('trash')}</button>` : '';
   return `<div class="srv-card ${up ? '' : 'down'}" data-key="srv:${esc(e.id)}"><div class="row" style="flex-wrap:nowrap;align-items:flex-start"><div class="pic" style="width:56px;height:56px;font-size:22px;background:${st.favicon ? 'none' : 'var(--grad)'}">${fav}</div><div class="grow" style="min-width:0"><div class="srv-name">${esc(e.name)} ${e.kind === 'hosted' ? '<span class="chip acc">Hosted by you</span>' : ''}</div><div class="dim mono" style="font-size:12px">${esc(e.host)}${e.port ? ':' + e.port : ''}</div></div><span class="dot ${loading ? 'starting' : up ? 'running' : 'stopped'}" data-tip="${loading ? 'Checking…' : up ? 'Online' : 'Offline or unreachable'}"></span></div>
-  <div class="srv-motd">${up ? esc(st.motd || ' ') : loading ? 'Checking…' : 'Could not reach this server.'}</div>
-  <div class="row srv-stats">${up ? `<span>${ic('user')}${st.players.online}/${st.players.max}</span><span>${st.ms} ms</span><span>${esc(st.version)}</span>` : ''}</div>
+  <div class="srv-motd">${up ? esc(st.motd || ' ') : loading ? 'Checking…' : e.kind === 'disc' ? 'Listed as online. Its details could not be checked from here, you can still try to join.' : 'Could not reach this server.'}</div>
+  <div class="row srv-stats">${up ? `<span>${ic('user')}${st.players.online}/${st.players.max}</span><span>${st.ms} ms</span><span>${esc(st.version)}</span>${e.country ? `<span>${esc(e.country)}</span>` : ''}` : e.kind === 'disc' ? `<span>${ic('user')}${e.players}/${e.max}</span>${e.country ? `<span>${esc(e.country)}</span>` : ''}` : ''}</div>
   <div class="row" style="margin-top:10px">${mode}</div>
-  <div class="row" style="margin-top:12px"><button class="btn primary" data-hact="sjoin" data-host="${esc(e.host)}" data-port="${e.port || 0}" ${up && !need ? '' : 'disabled'}>Join</button>${btn}${need ? '<span class="srv-note">Needs a Microsoft account</span>' : ''}</div></div>`;
+  <div class="row" style="margin-top:12px"><button class="btn primary" data-hact="sjoin" data-host="${esc(e.host)}" data-port="${e.port || 0}" ${(up || e.kind === 'disc' || e.kind === 'curated') && !need ? '' : 'disabled'}>Join</button>${btn}${need ? '<span class="srv-note">Needs a Microsoft account</span>' : ''}</div></div>`;
+}
+async function discLoad(reset) {
+  const D = S.srv.disc; if (D.loading && !reset) return; const tok = ++D.tok; D.loading = true; D.err = ''; if (reset) { D.list = []; D.next = ''; } schedSrvRender();
+  try {
+    const r = await call('srvDiscover', { search: D.q, sort: D.sort, country: D.country, next: reset ? '' : D.next }); if (tok !== D.tok) return;
+    const have = new Set(D.list.map(x => x.id)); D.list.push(...r.servers.filter(x => !have.has(x.id))); D.next = r.next || '';
+  } catch (e) { if (tok !== D.tok) return; D.err = String(e.message || e).replace(/^.*Error: /, ''); }
+  D.loaded = true; D.loading = false; schedSrvRender(); srvRefresh();
 }
 function pgServers() {
-  queueMicrotask(() => srvRefresh()); const ms = !!S.settings.activeMs, f = S.srv.filter;
-  const rows = srvEntries().map(e => ({ e, st: S.srv.status[srvKey(e.host, e.port)] || { state: 'loading' } })).filter(({ st }) => f === 'all' || (f === 'ms' && st.mode === 'online') || (f === 'off' && st.mode === 'offline') || (f === 'up' && st.online));
-  const head = `<div class="page-head"><h1>Library</h1>${libSeg()}<div class="grow"></div><button class="btn ${S.srv.browse ? 'primary' : ''}" data-key="sbrowse" data-hact="sbrowse">${ic('globe')}Browse servers</button><button class="btn icon" data-hact="srefresh" data-tip="Refresh">${ic('refresh')}</button></div>`;
+  if (!S.srv.viewSet) { S.srv.viewSet = true; if (!(S.settings.servers || []).length) S.srv.view = 'disc'; }
+  queueMicrotask(() => srvRefresh()); const ms = !!S.settings.activeMs, f = S.srv.filter, v = S.srv.view, D = S.srv.disc;
+  if (v === 'disc' && !D.loaded && !D.loading) queueMicrotask(() => discLoad(true));
+  const head = `<div class="page-head"><h1>Library</h1>${libSeg()}<div class="grow"></div><button class="btn icon" data-hact="srefresh" data-tip="Refresh">${ic('refresh')}</button></div>`;
   const acct = `<div class="srv-acct ${ms ? 'ms' : 'off'}" data-key="srvacct">${ic(ms ? 'check' : 'lock')}<span>Playing as <b>${esc(S.settings.username || 'nobody')}</b> · ${ms ? 'Microsoft account: you can join any server' : 'offline account: you can only join servers that allow offline players'}</span></div>`;
-  const bar = `<div class="row" style="margin:14px 0"><div class="search" style="flex:1;max-width:380px"><input id="srvadd" placeholder="Add a server, e.g. play.example.com:25565">${ic('plus')}</div><button class="btn primary" data-hact="sadd">Add</button><div class="cchips" style="margin:0 0 0 12px">${[['all', 'All'], ['ms', 'Microsoft only'], ['off', 'Offline friendly'], ['up', 'Online now']].map(([k, l]) => `<button class="cchip ${f === k ? 'on' : ''}" data-hact="sfilter" data-v="${k}">${l}</button>`).join('')}</div></div>`;
+  const tabs = `<div class="tabs" data-key="svtabs" style="margin:16px 0 14px">${[['mine', 'My servers'], ['disc', 'Discover public servers']].map(([k, l]) => `<button class="${v === k ? 'on' : ''}" data-hact="sview" data-v="${k}">${l}</button>`).join('')}</div>`;
+  const chips = `<div class="cchips" style="margin:0">${[['all', 'All'], ['ms', 'Microsoft only'], ['off', 'Offline friendly'], ['up', 'Online now']].map(([k, l]) => `<button class="cchip ${f === k ? 'on' : ''}" data-hact="sfilter" data-v="${k}">${l}</button>`).join('')}</div>`;
+  const bar = v === 'disc'
+    ? `<div class="row" style="margin:0 0 14px;gap:10px;flex-wrap:wrap" data-key="sdbar"><div class="search" style="flex:1;min-width:220px;max-width:360px"><input id="sdq" value="${esc(D.q)}" placeholder="Search by name or address" autocomplete="off">${ic('search')}</div><button class="btn primary" data-hact="sdsearch">Search</button>
+      <select data-sd="sort" style="width:170px">${[['players', 'Most players'], ['rank', 'Top ranked']].map(([k, l]) => `<option value="${k}" ${D.sort === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <select data-sd="country" style="width:170px">${SD_COUNTRIES.map(([k, l]) => `<option value="${k}" ${D.country === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <button class="cchip ${D.hideEmpty ? 'on' : ''}" data-hact="sdempty">Hide empty</button>${chips}</div>`
+    : `<div class="row" style="margin:14px 0"><div class="search" style="flex:1;max-width:380px"><input id="srvadd" placeholder="Add a server, e.g. play.example.com:25565">${ic('plus')}</div><button class="btn primary" data-hact="sadd">Add</button><div style="margin-left:12px">${chips}</div></div>`;
+  const all = srvEntries().map(e => ({ e, st: S.srv.status[srvKey(e.host, e.port)] || { state: 'loading' } }));
+  const rows = all.filter(({ e, st }) => (f === 'all' || (f === 'ms' && st.mode === 'online') || (f === 'off' && st.mode === 'offline') || (f === 'up' && st.online)) && !(v === 'disc' && D.hideEmpty && e.kind === 'disc' && !(e.players > 0)));
   const cards = rows.map(({ e, st }) => srvCard(e, st, ms)).join('');
-  return head + acct + bar + (cards ? `<div class="grid srv-grid" data-key="srvgrid">${cards}</div>` : `<div class="empty" data-key="srvempty"><div><h3>No servers here yet</h3><div>Add one by its address, or press Browse servers to see popular ones.</div></div></div>`);
+  let body;
+  if (v === 'disc') {
+    const fallback = D.err && !D.list.length;
+    const note = D.err ? `<div class="chipwarn" data-key="sderr" style="margin:0 0 12px;display:flex;gap:10px;align-items:center">${esc(D.err)}${fallback ? ' Showing a few popular servers instead.' : ''}<button class="btn sm" data-hact="sdretry">Try again</button></div>` : '';
+    const more = D.loading ? `<div data-key="sdload">${loadingHtml('Looking for servers…')}</div>` : D.next && !fallback ? `<div class="row" data-key="sdmore" style="justify-content:center;margin:18px 0"><button class="btn" data-hact="sdmore">Load more servers</button></div>` : '';
+    const hint = !D.loading && D.list.length ? `<div class="dim" data-key="sdcount" style="margin:0 0 10px;font-size:12.5px">${rows.length} of ${D.list.length} loaded servers shown${f === 'ms' || f === 'off' ? ' (the Microsoft/offline check runs on each server, so it may take a moment)' : ''}.</div>` : '';
+    body = note + hint + (cards ? `<div class="grid srv-grid" data-key="srvgrid">${cards}</div>` : D.loading ? '' : `<div class="empty" data-key="srvempty"><div><h3>No servers found</h3><div>Try another search, another country or a different filter.</div></div></div>`) + more;
+  } else body = cards ? `<div class="grid srv-grid" data-key="srvgrid">${cards}</div>` : `<div class="empty" data-key="srvempty"><div><h3>No servers here yet</h3><div>Add one by its address, or open "Discover public servers" to find some.</div><div class="row" style="justify-content:center"><button class="btn primary" data-hact="sview" data-v="disc">${ic('globe')}Discover servers</button></div></div></div>`;
+  return head + acct + tabs + bar + body;
 }
+const verParts = v => { const m = /^(\d+)\.(\d+)(?:\.(\d+|x))?/.exec(String(v)); return m ? [+m[1], +m[2], m[3] === undefined || m[3] === 'x' ? (m[3] === 'x' ? Infinity : 0) : +m[3]] : null; };
+const verCmp = (a, b) => { for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1; return 0; };
+// does a Minecraft version (1.21.4) fit what a server announces ("Paper 1.21.4", "1.8.x-1.21.x", "1.20")?
+function verMatches(mc, text) {
+  const v = verParts(mc), t = String(text || ''); if (!v || !t) return false;
+  const rg = /(\d+\.\d+(?:\.(?:\d+|x))?)\s*(?:-|–|to)\s*(\d+\.\d+(?:\.(?:\d+|x))?)/.exec(t);
+  if (rg) { const lo = verParts(rg[1]), hi = verParts(rg[2]); if (lo && hi && verCmp(v, lo) >= 0 && verCmp(v, hi) <= 0) return true; }
+  return (t.match(/\d+\.\d+(?:\.\d+)?/g) || []).some(x => { const p = verParts(x); return p && p[0] === v[0] && p[1] === v[1] && (x.split('.').length < 3 || p[2] === v[2]); });
+}
+const serverMc = t => { const m = /(\d+\.\d+(?:\.\d+)?)(?!.*\d+\.\d+)/.exec(String(t || '')); return m ? m[1] : ''; };
 function joinModal(host, port) {
-  const st = S.srv.status[srvKey(host, port)] || {}, ins = [...S.instances].sort((a, b) => (b.mc === st.version) - (a.mc === st.version) || (b.lastPlayed || 0) - (a.lastPlayed || 0));
-  if (!ins.length) { toast('Create an instance first, then join a server with it', true); return; }
-  modal(`<h2>Join ${esc(host)}</h2><label>Play with this instance${st.version ? ` (server is on ${esc(st.version)})` : ''}</label><select id="joininst">${ins.map(i => `<option value="${esc(i.id)}">${esc(i.name)} · ${esc(i.mc)} ${LN(i.loader)}${i.mc === st.version ? ' ✓ matches' : ''}</option>`).join('')}</select><div class="dim" style="margin-top:10px;font-size:12.5px">Joining as <b>${esc(S.settings.username)}</b> (${S.settings.activeMs ? 'Microsoft account' : 'offline account'}). The game starts and connects automatically.</div><div class="foot"><button class="btn" data-act="closemodal">Cancel</button><button class="btn primary" data-hact="dojoin" data-addr="${esc(host)}${port ? ':' + port : ''}">${ic('play')}Join server</button></div>`);
+  const st = S.srv.status[srvKey(host, port)] || {}, fits = i => verMatches(i.mc, st.version), ins = [...S.instances].sort((a, b) => fits(b) - fits(a) || (b.lastPlayed || 0) - (a.lastPlayed || 0));
+  const want = serverMc(st.version), any = ins.some(fits), addr = `${host}${port ? ':' + port : ''}`;
+  const make = want && !any ? `<div class="chipwarn" style="margin-top:12px">None of your instances is on ${esc(want)}. <button class="btn sm" data-hact="joinmake" data-mc="${esc(want)}" data-addr="${esc(addr)}">Create a ${esc(want)} instance</button></div>` : '';
+  if (!ins.length && !want) { toast('Create an instance first, then join a server with it', true); return; }
+  modal(`<h2>Join ${esc(host)}</h2><label>Play with this instance${st.version ? ` (server is on ${esc(st.version)})` : ''}</label>${ins.length ? `<select id="joininst">${ins.map(i => `<option value="${esc(i.id)}" ${i === ins[0] && fits(i) ? 'selected' : ''}>${esc(i.name)} · ${esc(i.mc)} ${LN(i.loader)}${fits(i) ? ' ✓ matches' : ''}</option>`).join('')}</select>` : '<div class="dim">You have no instances yet.</div>'}${make}<div class="dim" style="margin-top:10px;font-size:12.5px">Joining as <b>${esc(S.settings.username)}</b> (${S.settings.activeMs ? 'Microsoft account' : 'offline account'}). The game starts and connects automatically.</div><div class="foot"><button class="btn" data-act="closemodal">Cancel</button>${ins.length ? `<button class="btn primary" data-hact="dojoin" data-addr="${esc(addr)}">${ic('play')}Join server</button>` : ''}</div>`);
 }
 
 // ---- hosting your own server
@@ -128,13 +170,19 @@ document.addEventListener('click', async e => {
   const t = e.target.closest('[data-hact]'); if (!t) return; e.stopPropagation(); const a = t.dataset.hact, H = S.host, id = H.sel;
   switch (a) {
     case 'libtab': S.libTab = t.dataset.v; render(true); if (S.libTab === 'servers') call('hostList').then(l => { H.list = l || []; schedSrvRender(); }); break;
-    case 'sbrowse': S.srv.browse = !S.srv.browse; render(); break;
-    case 'srefresh': srvRefresh(true); break;
+    case 'sview': S.srv.view = t.dataset.v; render(true); break;
+    case 'sdsearch': S.srv.disc.q = ($('#sdq') || {}).value || ''; discLoad(true); break;
+    case 'sdmore': discLoad(false); break;
+    case 'sdretry': discLoad(true); break;
+    case 'sdempty': S.srv.disc.hideEmpty = !S.srv.disc.hideEmpty; render(); break;
+    case 'sdadd': { const host = t.dataset.host, port = +t.dataset.port || 0; if ((S.settings.servers || []).some(x => srvKey(x.host, x.port) === srvKey(host, port))) { toast('Already in your list'); break; } await call('saveSettings', { servers: [...(S.settings.servers || []), { id: 'sv' + Date.now(), name: t.dataset.name, host, port }] }); toast(t.dataset.name + ' added to My servers'); break; }
+    case 'srefresh': if (S.srv.view === 'disc') discLoad(true); else srvRefresh(true); break;
     case 'sfilter': S.srv.filter = t.dataset.v; render(); break;
     case 'sadd': { const p = parseAddr($('#srvadd').value); if (!p) { toast('Type a server address like play.example.com', true); break; } await call('saveSettings', { servers: [...(S.settings.servers || []), { id: 'sv' + Date.now(), name: p.host, host: p.host, port: p.port }] }); $('#srvadd').value = ''; break; }
     case 'scur': await call('saveSettings', { servers: [...(S.settings.servers || []), { id: 'sv' + Date.now(), name: t.dataset.name, host: t.dataset.host, port: 0 }] }); toast(t.dataset.name + ' added to your list'); break;
     case 'srem': await call('saveSettings', { servers: (S.settings.servers || []).filter(s => s.id !== t.dataset.id) }); break;
     case 'sjoin': joinModal(t.dataset.host, +t.dataset.port || 0); break;
+    case 'joinmake': { closeModal(); try { const i = await call('createInstance', { name: 'Server ' + t.dataset.mc, mc: t.dataset.mc, loader: 'vanilla' }); if (i) toast(`Creating ${t.dataset.mc}. When it has finished installing, press Join again.`); } catch (e) { toast(String(e && e.message || e).replace(/^.*Error: /, ''), true); } break; }
     case 'dojoin': { const inst = $('#joininst').value; closeModal(); toast('Starting the game and joining…'); call('launch', inst, { join: t.dataset.addr }); break; }
     case 'hnew': hostNewModal(); break;
     case 'htype': { H.cr.type = t.dataset.v; t.parentElement.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === t)); loadHostVersions(H.cr.type); break; }
@@ -154,15 +202,17 @@ document.addEventListener('click', async e => {
     case 'hsend': { const i = $('#hcmd'); if (i && i.value.trim()) { call('hostCommand', id, i.value.trim().replace(/^\//, '')); i.value = ''; } break; }
   }
 }, true);
+document.addEventListener('input', e => { if (e.target.id === 'sdq') S.srv.disc.q = e.target.value; });
 document.addEventListener('change', async e => {
   const t = e.target, H = S.host; if (!t.dataset) return;
+  if (t.dataset.sd) { S.srv.disc[t.dataset.sd] = t.value; discLoad(true); return; }
   if (t.dataset.hprop) hostUpd(await call('hostSave', H.sel, { props: { [t.dataset.hprop]: t.type === 'checkbox' ? String(t.checked) : t.value } }));
   else if (t.dataset.hmeta) { const v = t.type === 'checkbox' ? t.checked : (t.type === 'range' || t.type === 'number') ? +t.value : t.value; hostUpd(await call('hostSave', H.sel, { [t.dataset.hmeta]: v })); if (t.dataset.hmeta === 'name') schedHostRender(); }
 }, true);
 document.addEventListener('input', e => {
   const t = e.target; if (t.dataset && t.dataset.hmeta === 'ramMB') { const b = t.parentElement.querySelector('[data-hramv]'); if (b) b.textContent = t.value + ' MB'; } else if (t.id === 'hram') $('#hramv').textContent = t.value + ' MB';
 }, true);
-document.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.id === 'hcmd') { e.preventDefault(); const i = e.target; if (i.value.trim()) { call('hostCommand', S.host.sel, i.value.trim().replace(/^\//, '')); i.value = ''; } } else if (e.key === 'Enter' && e.target.id === 'srvadd') document.querySelector('[data-hact=sadd]').click(); }, true);
+document.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.id === 'hcmd') { e.preventDefault(); const i = e.target; if (i.value.trim()) { call('hostCommand', S.host.sel, i.value.trim().replace(/^\//, '')); i.value = ''; } } else if (e.key === 'Enter' && e.target.id === 'sdq') document.querySelector('[data-hact=sdsearch]').click(); else if (e.key === 'Enter' && e.target.id === 'srvadd') document.querySelector('[data-hact=sadd]').click(); }, true);
 document.addEventListener('toggle', e => { if (e.target.classList && e.target.classList.contains('howto')) S.host.howto = e.target.open; }, true);
 window.oc.on('hoststate', r => { const x = S.host.list.find(h => h.id === r.id); if (x) x.runtime = r; S.host.netT = 0; if (S.page === 'host') schedHostRender(); schedSrvRender(); });
 window.oc.on('hostlog', ({ id, lines }) => { const L = (S.host.logs[id] = S.host.logs[id] || []); L.push(...lines); if (L.length > 2500) L.splice(0, L.length - 2500); if (S.page === 'host' && S.host.sel === id && S.host.tab === 'con') pushHostCon(lines); });

@@ -33,7 +33,15 @@ const hsize = b => b < 1024 ? b + ' B' : b < 1048576 ? (b / 1024).toFixed(0) + '
 const hcount = n => n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : String(n);
 const ago = t => { if (!t) return 'Never played'; const d = Date.now() / 1000 - t; return d < 60 ? 'Just now' : d < 3600 ? (d / 60 | 0) + 'm ago' : d < 86400 ? (d / 3600 | 0) + 'h ago' : (d / 86400 | 0) + 'd ago'; };
 const letter = s => esc((s || '?').trim()[0]?.toUpperCase() || '?');
-const call = (...a) => window.oc.call(...a);
+// Every backend call that takes more than a moment shows the thin loading bar at the top (frequent background polling is excluded).
+const QUIET_CALLS = new Set(['serverStatus', 'winGetBounds', 'winSetBounds', 'winIsMax', 'instanceStats', 'console', 'hostList', 'hostNet', 'identify', 'worldSizes', 'hasUndo', 'rustStatus', 'skinLibrary']);
+let pendingCalls = 0, loadTimer = 0;
+const call = (name, ...a) => {
+  const quiet = QUIET_CALLS.has(name); if (!quiet && ++pendingCalls === 1) loadTimer = setTimeout(() => document.documentElement.classList.add('loading'), 350);
+  const p = window.oc.call(name, ...a), done = () => { if (!quiet && --pendingCalls <= 0) { pendingCalls = 0; clearTimeout(loadTimer); document.documentElement.classList.remove('loading'); } };
+  p.then(done, done); return p;
+};
+const loadingHtml = t => `<div class="loading-row"><span class="spin"></span><span>${t}</span></div>`;
 
 const S = {
   settings: { accent: 0, accounts: [], username: '' }, instances: [], running: {}, busy: [], versions: [], javas: [], root: '',
@@ -64,19 +72,23 @@ document.addEventListener('scroll', hideTip, true); document.addEventListener('m
 const PRESETS = [['Emerald', '#34d399', '#34d399'], ['Violet', '#8b5cf6', '#8b5cf6'], ['Sky', '#38bdf8', '#38bdf8'], ['Rose', '#f43f5e', '#f43f5e'], ['Amber', '#fbbf24', '#fbbf24'],
   ['Aurora', '#34d399', '#22d3ee'], ['Sunset', '#f97316', '#ec4899'], ['Ocean', '#06b6d4', '#6366f1'], ['Neon', '#a855f7', '#ec4899'], ['Fire', '#ef4444', '#f59e0b'], ['Lime', '#a3e635', '#22c55e']];
 const hex2rgb = h => { h = String(h || '#34d399').replace('#', ''); if (h.length === 3) h = [...h].map(c => c + c).join(''); const n = parseInt(h, 16) || 0; return [n >> 16 & 255, n >> 8 & 255, n & 255]; };
+const themeVars = { c: {}, setProperty(k, v) { v = String(v); if (this.c[k] === v) return; this.c[k] = v; document.documentElement.style.setProperty(k, v); } };
 function applyTheme() {
-  const s = S.settings, r = document.documentElement.style, A = hex2rgb(s.accentA), B = hex2rgb(s.accentB || s.accentA);
+  if (window.layoutGrips) queueMicrotask(window.layoutGrips);
+  const s = S.settings, r = themeVars, A = hex2rgb(s.accentA), B = hex2rgb(s.accentB || s.accentA);
   r.setProperty('--a', A.join(',')); r.setProperty('--a2', B.join(','));
   r.setProperty('--grad', `linear-gradient(135deg,rgb(${A}),rgb(${B}))`); r.setProperty('--gradv', `linear-gradient(180deg,rgb(${A}),rgb(${B}))`);
   const lum = c => 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]; r.setProperty('--onacc', (lum(A) + lum(B)) / 2 > 150 ? '#04120c' : '#ffffff');
   const PC = hex2rgb(s.panelColor || '#12151c'), WC = hex2rgb(s.appColor || '#0b0d12'), lift = (c, k) => c.map(v => Math.min(255, Math.round(v + (255 - v) * k))), dark = (c, k) => c.map(v => Math.round(v * k));
   r.setProperty('--panel', `rgba(${PC},var(--pa,1))`); r.setProperty('--panel2', `rgba(${lift(PC, .045)},var(--pa,1))`); r.setProperty('--pop', `rgb(${lift(PC, .03)})`); r.setProperty('--bg', `rgb(${WC})`);
-  { const so = (s.sidebarOpacity ?? 100) / 100; r.setProperty('--bar', `rgba(${dark(WC, .75)},${so})`); r.setProperty('--side', `rgba(${dark(WC, .75)},${so})`); }
+  { const so = (s.sidebarOpacity ?? 100) / 100; r.setProperty('--bar', `rgba(${dark(WC, .75)},${so})`); r.setProperty('--side', `rgba(${dark(WC, .75)},${so})`); r.setProperty('--glass-base', `rgba(${dark(WC, .75)},${(so * .5).toFixed(3)})`); }
   const light = lum(PC) > 150; r.setProperty('--text', light ? '#10131a' : '#e9edf5'); r.setProperty('--dim', light ? '#4f5870' : '#8a93a8'); r.setProperty('--dim2', light ? '#737c92' : '#5d667b'); r.setProperty('--line', light ? 'rgba(0,0,0,.12)' : 'rgba(255,255,255,.07)');
   const app = $('#app'), hasBg = !!(s.bgUrl && s.bgType && s.bgType !== 'none'); app.classList.toggle('noanim', s.animations === false);
-  const pos = s.sidebarPos || 'left'; placeSide(pos); { const lab = s.sidebarLabels !== false; if (S._lab !== undefined && S._lab !== lab) trackInd(450); S._lab = lab; } app.classList.toggle('lite', ((S.gfx && S.gfx.level) || 0) >= 6);
-  app.classList.toggle('has-bg', hasBg); app.classList.toggle('pblur', hasBg && (s.panelBlur || 0) > 0); r.setProperty('--pblur', (s.panelBlur || 0) + 'px'); app.classList.toggle('sblur', (s.sidebarBlur || 0) > 0); r.setProperty('--sblur', (s.sidebarBlur || 0) + 'px'); app.classList.remove('sb-left', 'sb-right', 'sb-top'); app.classList.add('sb-' + (s.sidebarPos || 'left')); app.classList.toggle('sb-compact', s.sidebarLabels === false);
+  const pos = sidePos(); placeSide(pos); { const lab = s.sidebarLabels !== false; if (S._lab !== undefined && S._lab !== lab) trackInd(450); S._lab = lab; } app.classList.toggle('lite', ((S.gfx && S.gfx.level) || 0) >= 6);
+  app.classList.toggle('has-bg', hasBg); app.classList.toggle('pblur', hasBg && (s.panelBlur || 0) > 0); r.setProperty('--pblur', (s.panelBlur || 0) + 'px'); app.classList.toggle('sblur', (s.sidebarBlur || 0) > 0); r.setProperty('--sblur', (s.sidebarBlur || 0) + 'px'); app.classList.remove('sb-left', 'sb-right', 'sb-top', 'sb-bottom'); app.classList.add('sb-' + pos); app.classList.toggle('sb-bar', !!s.secondBar); app.classList.toggle('lglass', !!s.sidebarGlass); { const d = $('#lg-disp'); if (d) d.setAttribute('scale', s.glassRefract ?? 14); } app.classList.toggle('sb-compact', s.sidebarLabels === false);
+  if (window.looksApply) looksApply(s, hasBg);
   r.setProperty('--pa', hasBg ? (s.panelOpacity ?? 88) / 100 : 1); r.setProperty('--bgdim', (s.bgDim ?? 45) / 100); r.setProperty('--bgblur', (s.bgBlur || 0) + 'px');
+  { const z = (s.uiScale || 100) / 100; r.setProperty('--win-r-set', (s.winRadius ?? 12) / z + 'px'); r.setProperty('--m-full', (s.winMargin || 14) / z + 'px'); } document.documentElement.classList.toggle('rounded', !!s.winRounded);
   { const oc = hex2rgb(s.outlineColor || '#ffffff'); r.setProperty('--ol', `rgba(${oc},${(s.outlineOpacity ?? 30) / 100})`); r.setProperty('--ol-w', (s.outlineSize ?? 2) + 'px'); }
   const bg = $('#bg'), key = hasBg ? s.bgType + s.bgUrl : '';
   const keyChanged = bg.dataset.key !== key;
@@ -84,11 +96,16 @@ function applyTheme() {
   bg.classList.toggle('blurred', (s.bgBlur || 0) > 0);
   if (keyChanged) setTimeout(updateBgPlayback, 50);
 }
+// the separate bar always shows the navigation in the title row
+const sidePos = () => S.settings.sidebarPos || 'left';
 function trackInd(ms = 450) { const end = performance.now() + ms; const step = () => { moveInd(false); if (performance.now() < end) requestAnimationFrame(step); }; requestAnimationFrame(step); }
 function placeSide(pos) {
   const side = $('#side'), tb = $('#titlebar'), body = $('#body'); if (!side) return; const changed = S._pos !== undefined && S._pos !== pos; S._pos = pos;
-  if (pos === 'top') { if (side.parentElement !== tb) tb.insertBefore(side, $('#acct')); }
+  const acct = $('#acct'), bar = !!S.settings.secondBar && (pos === 'top' || pos === 'bottom');
+  if (pos === 'top') { if (side.parentElement !== tb) tb.insertBefore(side, acct.parentElement === tb ? acct : $('.winbtns')); }
   else if (side.parentElement !== body) body.insertBefore(side, $('#main'));
+  if (bar && acct.parentElement !== side) side.appendChild(acct);
+  else if (!bar && acct.parentElement !== tb) tb.insertBefore(acct, $('.winbtns'));
   if (changed) { side.classList.remove('sidein'); void side.offsetWidth; side.classList.add('sidein'); trackInd(500); }
 }
 const applyAccent = applyTheme;
@@ -107,17 +124,20 @@ window.addEventListener('blur', updateBgPlayback); window.addEventListener('focu
 function avatarHtml(name, msId) {
   const s = S.settings, ms = msId && (s.msAccounts || []).find(x => x.id === msId), sk = !msId && s.skins && s.skins[name], url = ms ? ms.skinUrl : (sk && sk.url);
   if (url) { const u = cssUrl(url); return `<div class="avatar face" style="background-image:${u},${u}"></div>`; }
-  return msId ? `<div class="avatar" style="background:var(--grad)"><img class="pimg" data-l="${letter(name)}" src="https://mc-heads.net/avatar/${esc(msId)}/64" alt=""></div>` : `<div class="avatar" style="background:${grad(name)}">${letter(name)}</div>`;
+  return msId ? `<div class="avatar" style="background:var(--grad)"><img class="pimg" loading="lazy" decoding="async" data-l="${letter(name)}" src="https://mc-heads.net/avatar/${esc(msId)}/64" alt=""></div>` : `<div class="avatar" style="background:${grad(name)}">${letter(name)}</div>`;
 }
 function renderTop() {
   const u = S.settings.username;
   if (!u) { morph($('#acct'), `<button class="btn primary sm" data-key="acct:add" data-act="addacct">${ic('plus')}Add account</button>`); return; }
   morph($('#acct'), `<button class="pill" data-key="acct:pill" data-act="acctmenu">${avatarHtml(u, S.settings.activeMs)}<b style="font-weight:600">${esc(u)}</b>${ic('chev')}</button>`);
 }
+const NAV_ITEMS = [['library', 'Library', 'library'], ['discover', 'Discover', 'discover'], ['skins', 'Skins', 'user'], ['accounts', 'Accounts', 'users'], ['host', 'Server', 'server']];
+function navList() { const o = (S.settings.navOrder || []).filter(id => NAV_ITEMS.some(n => n[0] === id)); NAV_ITEMS.forEach(n => { if (!o.includes(n[0])) o.push(n[0]); }); return o.map(id => NAV_ITEMS.find(n => n[0] === id)); }
 function renderSide() {
   requestAnimationFrame(() => moveInd(true));
-  const n = (id, label, icon) => `<button data-key="nav:${id}" class="nav ${S.page === id || (id === 'library' && S.page === 'instance') || (id === 'settings' && S.page === 'console') ? 'on' : ''}" data-act="nav" data-p="${id}" ${S.settings.sidebarLabels === false ? `data-tip="${label}" data-tip-pos="${S.settings.sidebarPos === 'right' ? 'left' : S.settings.sidebarPos === 'top' ? 'bottom' : 'right'}"` : ''}>${ic(icon)}<span class="lbl">${label}</span>${id === 'library' && S.instances.length ? `<span class="badge">${S.instances.length}</span>` : ''}</button>`;
-  morph($('#navitems'), n('library', 'Library', 'library') + n('discover', 'Discover', 'discover') + n('skins', 'Skins', 'user') + n('host', 'Server', 'server') + '<div class="grow"></div>' + n('settings', 'Settings', 'settings'), { animate: false });
+  const n = (id, label, icon) => `<button data-key="nav:${id}" class="nav ${S.page === id || (id === 'library' && S.page === 'instance') || (id === 'settings' && S.page === 'console') ? 'on' : ''}" data-act="nav" data-p="${id}" ${S.settings.sidebarLabels === false ? `data-tip="${label}" data-tip-pos="${({ right: 'left', top: 'bottom', bottom: 'top' })[sidePos()] || 'right'}"` : ''}>${ic(icon)}<span class="lbl">${label}</span>${id === 'library' && S.instances.length ? `<span class="badge">${S.instances.length}</span>` : ''}</button>`;
+  const hid = S.settings.navHidden || [];
+  morph($('#navitems'), navList().filter(([id]) => id === 'library' || !hid.includes(id)).map(([id, l, i]) => n(id, l, i)).join('') + '<div class="grow"></div>' + n('settings', 'Settings', 'settings'), { animate: false });
 }
 let indReady = false;
 function moveInd(anim) {
@@ -125,23 +145,25 @@ function moveInd(anim) {
   const sr = side.getBoundingClientRect(), nr = on.getBoundingClientRect();
   ind.classList.toggle('noanim', !anim || !indReady);
   ind.style.opacity = 1; ind.style.width = nr.width + 'px'; ind.style.height = nr.height + 'px';
-  ind.style.transform = `translate(${nr.left - sr.left - side.clientLeft}px,${nr.top - sr.top - side.clientTop}px)`; indReady = true;
+  const tf = `translate(${nr.left - sr.left - side.clientLeft}px,${nr.top - sr.top - side.clientTop}px)`;
+  ind.style.transform = tf; indReady = true;
 }
 new ResizeObserver(() => moveInd(false)).observe($('#side'));
 function pgAnim(el) { if (!el) return; el.classList.remove('pg'); void el.offsetWidth; el.classList.add('pg'); }
-function render(anim) { S.animIn = !!anim; applyAccent(); renderTop(); renderSide(); const m = $('#main'); const sc = m.scrollTop; const html = ({ library: pgLibrary, discover: pgDiscover, instance: pgInstance, settings: pgSettings, console: pgConsole, skins: pgSkins, host: pgHost })[S.page](); if (anim || !m.firstElementChild) m.innerHTML = html; else morph(m, html, { animate: true }); if (S.page === 'discover') { renderResults(); } if (S.page === 'instance') afterInstance(); if (S.page === 'console') afterConsole(); if (S.page === 'host') afterHost(); if (S.page === 'skins') afterSkins(); m.scrollTop = sc; if (anim) pgAnim(m); }
+function render(anim) {
+  if (document.readyState !== 'complete') return; S.animIn = !!anim; applyAccent(); renderTop(); renderSide(); const m = $('#main'); const sc = m.scrollTop; const html = ({ library: pgLibrary, discover: pgDiscover, instance: pgInstance, settings: pgSettings, console: pgConsole, skins: pgSkins, host: pgHost, accounts: pgAccounts })[S.page](); if (anim || !m.firstElementChild) m.innerHTML = html; else morph(m, html, { animate: true }); if (S.page === 'discover') { renderResults(); } if (S.page === 'instance') afterInstance(); if (S.page === 'console') afterConsole(); if (S.page === 'host') afterHost(); if (S.page === 'skins') afterSkins(); m.scrollTop = sc; if (anim) pgAnim(m); }
 function go(p, sel) { if (p === 'host') hostEnter(); S.page = p; if (sel !== undefined) S.sel = sel; closePop(); render(true); if (p === 'skins') loadSkinLib().then(() => { if (S.page === 'skins') render(); }); if (p === 'discover') { ensureTarget(); refreshInstalled(); if (!S.disc.res) runSearch(); } }
 
 // ---------- library ----------
 function pgLibrary() {
   if (S.libTab === 'servers') return pgServers();
-  const list = S.instances.filter(i => i.name.toLowerCase().includes(S.filter.toLowerCase()));
-  const head = `<div class="page-head"><h1>Library</h1>${libSeg()}<div class="grow"></div><div class="search"><input id="libq" placeholder="Search instances" value="${esc(S.filter)}">${ic('search')}</div><button class="btn" data-act="import">${ic('file')}Import .mrpack</button><button class="btn primary" data-act="new">${ic('plus')}New instance</button></div>`;
+  const list = (window.libApply ? libApply(S.instances) : S.instances).filter(i => i.name.toLowerCase().includes(S.filter.toLowerCase()));
+  const head = `<div class="page-head"><h1>Library</h1>${libSeg()}<div class="grow"></div><div class="search"><input id="libq" placeholder="Search instances" value="${esc(S.filter)}">${ic('search')}</div><button class="btn" data-act="import">${ic('file')}Import .mrpack</button><button class="btn" data-xact="importprism" data-tip="Bring in an instance exported from MultiMC or Prism Launcher">${ic('file')}MultiMC / Prism</button><button class="btn primary" data-act="new">${ic('plus')}New instance</button></div>`;
   if (!S.instances.length) return head + `<div class="empty"><div><h3>No instances yet</h3><div>Create one, import a modpack, or grab a modpack from Discover.</div><div class="row" style="justify-content:center"><button class="btn primary" data-act="new">${ic('plus')}Create instance</button><button class="btn" data-act="nav" data-p="discover">Browse modpacks</button></div></div></div>`;
   const last = [...S.instances].filter(i => i.lastPlayed > 0).sort((x, y) => y.lastPlayed - x.lastPlayed)[0];
   const cont = last && !S.filter ? `<div class="cont" data-key="cont" style="--cover:${instCover(last)}"><div class="ic ${last.iconUrl ? 'img' : ''}" style="background:${last.iconUrl ? 'var(--panel)' : instBg(last)};color:${instFg(last)}">${instIcon(last)}</div><div class="grow"><div class="eyebrow">CONTINUE PLAYING</div><h2>${esc(last.name)}</h2><div class="chips"><span class="chip">${esc(last.mc)}</span><span class="chip acc">${LN(last.loader)}</span><span class="chip">${ago(last.lastPlayed)}</span><span class="chip">${(last.playTime / 3600 | 0)}h ${(last.playTime / 60 % 60 | 0)}m played</span></div></div>${playBtn(last)}</div>` : '';
   const pins = list.filter(i => i.pinned), rest = list.filter(i => !i.pinned), grid = (k, arr, off) => `<div class="grid ${S.animIn ? 'stagger' : ''}" data-key="grid:${k}">${arr.map((i, n) => card(i, n + off)).join('')}</div>`;
-  return head + cont + (pins.length ? `<div class="sect" data-key="sect:pin">${ic('pin')}Pinned <span>${pins.length}</span></div>${grid('pin', pins, 0)}` : '') + (rest.length || !pins.length ? `<div class="sect" data-key="sect:all">${S.filter ? 'Results' : pins.length ? 'Other instances' : 'All instances'} <span>${rest.length}</span></div>${grid('all', rest, pins.length)}` : '');
+  return head + (window.libBar ? libBar() : '') + cont + (pins.length ? `<div class="sect" data-key="sect:pin">${ic('pin')}Pinned <span>${pins.length}</span></div>${grid('pin', pins, 0)}` : '') + (rest.length || !pins.length ? `<div class="sect" data-key="sect:all">${S.filter ? 'Results' : pins.length ? 'Other instances' : 'All instances'} <span>${rest.length}</span></div>${grid('all', rest, pins.length)}` : '');
 }
 function playBtn(i, big) {
   const run = S.running[i.id], b = S.busy.includes(i.id);
@@ -158,30 +180,31 @@ function card(i, idx = 0) {
 const KINDS = { mods: ['mod', 'Mods'], resourcepacks: ['resourcepack', 'Resource packs'], shaders: ['shader', 'Shaders'], worlds: ['world', 'Worlds'] };
 function pgInstance() {
   const i = inst(S.sel); if (!i) { S.page = 'library'; return pgLibrary(); }
-  const tabs = [...Object.entries(KINDS).map(([k, v]) => [k, v[1]]), ['console', 'Console'], ['settings', 'Settings']];
+  const tabs = [...Object.entries(KINDS).map(([k, v]) => [k, v[1]]), ['shots', 'Screenshots'], ['backups', 'Backups'], ['console', 'Console'], ['settings', 'Settings']];
   return `<button class="btn sm" data-act="nav" data-p="library" style="margin-bottom:16px">${ic('back')}Library</button>
-  <div class="hero" style="--cover:${instCover(i)}"><div class="ic ${i.iconUrl ? 'img' : ''}" style="background:${i.iconUrl ? 'var(--panel)' : instBg(i)};color:${instFg(i)}">${instIcon(i)}</div><div class="grow"><h1>${esc(i.name)}</h1><div class="chips"><span class="chip">Minecraft ${esc(i.mc)}</span><span class="chip acc">${LN(i.loader)}${i.loaderVer ? ' ' + esc(i.loaderVer) : ''}</span><span class="chip">${ago(i.lastPlayed)}</span></div></div>${playBtn(i, true)}</div>
+  <div class="hero" style="--cover:${instCover(i)}"><div class="ic ${i.iconUrl ? 'img' : ''}" style="background:${i.iconUrl ? 'var(--panel)' : instBg(i)};color:${instFg(i)}">${instIcon(i)}</div><div class="grow"><h1>${esc(i.name)}</h1><div class="chips"><span class="chip">Minecraft ${esc(i.mc)}</span><span class="chip acc">${LN(i.loader)}${i.loaderVer ? ' ' + esc(i.loaderVer) : ''}</span><span class="chip">${ago(i.lastPlayed)}</span></div></div>${window.heroExtras ? heroExtras(i) : ''}${playBtn(i, true)}</div>
   <div class="stats" id="stats"><div class="stat"><b>${(i.playTime / 3600 | 0)}h ${(i.playTime / 60 % 60 | 0)}m</b><span>Play time</span></div><div class="stat"><b id="st-mods" data-morph="skip">–</b><span>Mods</span></div><div class="stat"><b id="st-packs" data-morph="skip">–</b><span>Resource packs</span></div><div class="stat"><b id="st-worlds" data-morph="skip">–</b><span>Worlds</span></div></div>
   <div class="tabs">${tabs.map(([k, l]) => `<button class="${S.tab === k ? 'on' : ''}" data-act="tab" data-t="${k}">${l}</button>`).join('')}</div><div id="tabbody" data-morph="skip"></div>`;
 }
 async function afterInstance() {
   const i = inst(S.sel); if (!i) return; const tb = $('#tabbody');
   call('instanceStats', i.id).then(s => { if (!s || S.sel !== i.id || !$('#st-mods')) return; $('#st-mods').textContent = s.mods; $('#st-packs').textContent = s.packs; $('#st-worlds').textContent = s.worlds; });
-  if (KINDS[S.tab]) { S.content = await call('listContent', i.id, KINDS[S.tab][0]); renderContent(); if (S.tab !== 'worlds') call('identify', i.id).then(async ch => { if (ch && S.page === 'instance' && S.sel === i.id && KINDS[S.tab]) { S.content = await call('listContent', i.id, KINDS[S.tab][0]); renderContent(); } }); }
-  else if (S.tab === 'console') { S.conLines = await call('console', i.id); tb.innerHTML = `<div class="row" style="margin-bottom:10px"><button class="btn sm" data-act="copycon">${ic('copy')}Copy all</button></div><div class="console" id="con"></div>`; const c = $('#con'); c.innerHTML = S.conLines.length ? S.conLines.map(conLine).join('') : '<span class="dim">Launch the game to see its live output here.</span>'; c.scrollTop = c.scrollHeight; }
-  else morph(tb, instSettings(i), { animate: false });
+  if (S.tab === 'shots' || S.tab === 'backups') { window.extraTab(i); return; }
+  if (KINDS[S.tab]) { tb.innerHTML = loadingHtml('Loading…'); S.content = await call('listContent', i.id, KINDS[S.tab][0]); renderContent(); if (S.tab === 'worlds' && window.afterWorlds) window.afterWorlds(i); if (S.tab !== 'worlds') call('identify', i.id).then(async ch => { if (ch && S.page === 'instance' && S.sel === i.id && KINDS[S.tab]) { S.content = await call('listContent', i.id, KINDS[S.tab][0]); renderContent(); } }); }
+  else if (S.tab === 'console') { S.conLines = await call('console', i.id); tb.innerHTML = `<div class="row" style="margin-bottom:10px"><button class="btn sm" data-act="copycon">${ic('copy')}Copy all</button><button class="btn sm" data-xact="sharelog" data-id="${esc(i.id)}" data-tip="Upload to mclo.gs and get a link">${ic('up')}Share log</button><input id="conq" placeholder="Filter lines…" style="width:190px;height:30px" autocomplete="off"><label class="tgl" style="gap:6px"><span>Warnings and errors only</span><span class="sw"><input type="checkbox" id="conerr"><i></i></span></label></div><div class="console" id="con"></div>`; const c = $('#con'); c.innerHTML = S.conLines.length ? S.conLines.map(conLine).join('') : '<span class="dim">Launch the game to see its live output here.</span>'; c.scrollTop = c.scrollHeight; }
+  else { morph(tb, instSettings(i), { animate: false }); if (window.afterInstSettings) window.afterInstSettings(i); }
 }
 const conLine = l => `<div class="${/ERROR|Exception|FATAL/.test(l) ? 'e' : /WARN/.test(l) ? 'w' : l.startsWith('[launcher]') ? 'l' : ''}">${esc(l)}</div>`;
 function renderContent() {
   const i = inst(S.sel), tb = $('#tabbody'); if (!tb || !i) return; const kind = KINDS[S.tab][0], name = KINDS[S.tab][1].toLowerCase();
   const bar = `<div class="row" style="margin-bottom:14px">${kind !== 'world' ? `<button class="btn primary" data-act="browse">${ic('plus')}Browse ${name}</button>` : ''}${kind === 'mod' ? `<button class="btn" data-act="updmods">${ic('up')}Update all</button>` : ''}<button class="btn" data-act="folder" data-sub="${{ mod: 'mods', resourcepack: 'resourcepacks', shader: 'shaderpacks', world: 'saves' }[kind]}">${ic('folder')}Open folder</button><button class="btn icon" data-act="refreshc" title="Refresh">${ic('refresh')}</button><span class="dim">${S.content.length} ${name}</span></div>`;
-  const rows = S.content.map(e => `<div class="item ${e.enabled ? '' : 'off'}" data-key="item:${esc(e.file)}"><div class="pic" style="background:${e.icon ? 'none' : grad(e.file)}">${e.icon ? `<img class="pimg" data-l="${letter(e.title)}" src="${esc(e.icon)}" width="40" height="40" style="object-fit:contain">` : letter(e.title)}</div><div class="grow"><div class="n">${esc(e.title)}</div><div class="s">${e.ver ? esc(e.ver) + ' · ' : ''}${e.dir ? 'folder' : hsize(e.size)}</div></div>${kind !== 'world' ? `<label class="sw"><input type="checkbox" ${e.enabled ? 'checked' : ''} data-act="toggle" data-f="${esc(e.file)}"><i></i></label>` : ''}<button class="btn sm" data-act="rmc" data-f="${esc(e.file)}">${ic('trash')}</button></div>`).join('');
+  const rows = S.content.map(e => `<div class="item ${e.enabled ? '' : 'off'}" data-key="item:${esc(e.file)}"><div class="pic" style="background:${e.icon ? 'none' : grad(e.file)}">${e.icon ? `<img class="pimg" loading="lazy" decoding="async" data-l="${letter(e.title)}" src="${esc(e.icon)}" width="40" height="40" style="object-fit:contain">` : letter(e.title)}</div><div class="grow"><div class="n">${esc(e.title)}</div><div class="s">${e.ver ? esc(e.ver) + ' · ' : ''}${kind === 'world' && window.worldSub ? worldSub(e) : e.dir ? 'folder' : hsize(e.size)}</div></div>${kind !== 'world' ? `<label class="sw"><input type="checkbox" ${e.enabled ? 'checked' : ''} data-act="toggle" data-f="${esc(e.file)}"><i></i></label>` : ''}${kind === 'world' ? `<button class="btn sm" data-xact="wbackup" data-id="${esc(i.id)}" data-w="${esc(e.file)}">${ic('download')}Back up</button><button class="btn sm" data-xact="wexport" data-id="${esc(i.id)}" data-w="${esc(e.file)}" data-tip="Save as a .zip">${ic('up')}Export</button><button class="btn sm" data-xact="wcopy" data-id="${esc(i.id)}" data-w="${esc(e.file)}" data-tip="Make a copy of this world">${ic('copy')}Copy</button>` : ''}<button class="btn sm" data-act="rmc" data-f="${esc(e.file)}">${ic('trash')}</button></div>`).join('');
   morph(tb, bar + (rows || `<div class="dim" style="padding:30px 0">${kind === 'world' ? 'No worlds yet — they appear here after you play.' : 'Nothing installed yet. Use Browse to add some.'}</div>`), { animate: false });
 }
 function instSettings(i) { return tipify(instSettingsRaw(i)); }
 function instSettingsRaw(i) {
   const ram = i.ramMB || S.settings.ramMB;
-  return `<div class="panel"><div class="line"><div class="l"><b>Name</b></div><input id="i-name" value="${esc(i.name)}" style="width:300px"></div>
+  return `${window.versionPanel ? versionPanel(i) : ''}${window.advPanel ? advPanel(i) : ''}<div class="panel"><div class="line"><div class="l"><b>Name</b></div><input id="i-name" value="${esc(i.name)}" style="width:300px"></div>
   <div class="line"><div class="l"><b>Logo</b><span>Your own icon for this instance. Reset goes back to the letter tile.</span></div><div class="row">${i.iconUrl ? `<img data-key="ic-thumb" class="bgthumb" style="width:48px;height:48px;border-radius:12px" src="${esc(i.iconUrl)}">` : ''}<button class="btn sm" data-key="ic-choose" data-act="pickimg" data-kind="icon">${ic('file')}Choose…</button>${i.iconUrl ? `<button class="btn sm" data-key="ic-reset" data-act="clearimg" data-kind="icon">Reset</button>` : ''}</div></div>
   <div class="line"><div class="l"><b>Card background</b><span>Image shown behind this instance's card and page header. Reset goes back to the color.</span></div><div class="row">${i.coverUrl ? `<img data-key="cv-thumb" class="bgthumb" src="${esc(i.coverUrl)}">` : ''}<button class="btn sm" data-key="cv-choose" data-act="pickimg" data-kind="cover">${ic('file')}Choose…</button>${i.coverUrl ? `<button class="btn sm" data-key="cv-reset" data-act="clearimg" data-kind="cover">Reset</button>` : ''}</div></div>
   <div class="line"><div class="l"><b>Card color</b><span>Color of this instance's card and icon. "Use accent" follows your theme color.</span></div><div class="row"><input type="color" id="i-color" value="${esc(i.color || S.settings.accentA || '#34d399')}"><button class="btn sm" data-act="icolor-reset">Use accent</button></div></div>
@@ -265,11 +288,16 @@ function pgSettingsRaw() {
   <div class="line"><div class="l"><b>Custom accent</b><span>Any color — or two for a gradient</span></div><div class="row"><input type="color" id="ca" value="${esc(s.accentA)}"><input class="hex" id="ca-hex" value="${esc(s.accentA)}" maxlength="7"><input type="color" id="cb" value="${esc(s.accentB || s.accentA)}"><input class="hex" id="cb-hex" value="${esc(s.accentB || s.accentA)}" maxlength="7"><button class="btn sm" data-act="solidacc">Solid</button><div class="gprev"></div></div></div>
   <div class="line"><div class="l"><b>Panel color</b><span>Cards, lists, menus · dark colors work best</span></div><div class="row"><input type="color" id="pc" value="${esc(s.panelColor || '#12151c')}"><input class="hex" id="pc-hex" value="${esc(s.panelColor || '#12151c')}" maxlength="7"><button class="btn sm" data-act="resetpanel">Reset</button></div></div>
   <div class="line"><div class="l"><b>Window color</b><span>The base behind everything</span></div><div class="row"><input type="color" id="wc" value="${esc(s.appColor || '#0b0d12')}"><input class="hex" id="wc-hex" value="${esc(s.appColor || '#0b0d12')}" maxlength="7"></div></div>
-  <div class="line"><div class="l"><b>App outline</b><span>A border around the whole launcher window</span></div><div class="row"><input type="color" id="olc" value="${esc(s.outlineColor || '#ffffff')}"><input class="hex" id="olc-hex" value="${esc(s.outlineColor || '#ffffff')}" maxlength="7"></div></div>
+  <div class="line"><div class="l"><b>Window style</b><span>Rounded floats the app inside a transparent frame: the outline sits outside the window and the corners are yours to set. Classic is the plain system-style window (use it if Rounded misbehaves on your PC, or start the launcher with --classic-window). The launcher restarts when you change this.</span></div><div class="seg">${[['rounded', 'Rounded'], ['classic', 'Classic']].map(([k, l]) => `<button class="${(s.winRounded ? 'rounded' : 'classic') === k ? 'on' : ''}" data-act="winstyle" data-v="${k}">${l}</button>`).join('')}</div></div>
+  <div class="line"><div class="l"><b>Window corners</b><span>${s.winRounded ? 'How round the window corners are. 0 is square.' : 'Only available with the Rounded window style.'}</span></div><div class="row"><input type="range" id="win-r" min="0" max="28" value="${s.winRadius ?? 12}" ${s.winRounded ? '' : 'disabled'}><b style="width:44px" id="win-rv">${s.winRadius ?? 12}px</b></div></div>
+  <div class="line"><div class="l"><b>App outline</b><span>A border around the whole launcher window${s.winRounded ? ', drawn outside the corners' : ''}</span></div><div class="row"><input type="color" id="olc" value="${esc(s.outlineColor || '#ffffff')}"><input class="hex" id="olc-hex" value="${esc(s.outlineColor || '#ffffff')}" maxlength="7"></div></div>
   <div class="line"><div class="l"><b>Outline opacity</b></div><div class="row"><input type="range" id="ol-op" min="0" max="100" value="${s.outlineOpacity ?? 30}"><b style="width:44px" id="ol-opv">${s.outlineOpacity ?? 30}%</b></div></div>
   <div class="line"><div class="l"><b>Outline size</b><span>0 hides it</span></div><div class="row"><input type="range" id="ol-sz" min="0" max="8" value="${s.outlineSize ?? 2}"><b style="width:44px" id="ol-szv">${s.outlineSize ?? 2}px</b></div></div>
-  <div class="line"><div class="l"><b>Sidebar position</b></div><div class="seg">${[['left', 'Left'], ['right', 'Right'], ['top', 'Top']].map(([k, l]) => `<button class="${(s.sidebarPos || 'left') === k ? 'on' : ''}" data-act="sbpos" data-v="${k}">${l}</button>`).join('')}</div></div>
+  <div class="line"><div class="l"><b>Sidebar position</b></div><div class="seg">${[['left', 'Left'], ['right', 'Right'], ['top', 'Top'], ['bottom', 'Bottom']].map(([k, l]) => `<button class="${(s.sidebarPos || 'left') === k ? 'on' : ''}" data-act="sbpos" data-v="${k}">${l}</button>`).join('')}</div></div>
   <div class="line"><div class="l"><b>Sidebar style</b><span>Icons only makes it smaller</span></div><div class="seg"><button class="${s.sidebarLabels !== false ? 'on' : ''}" data-act="sblabels" data-v="1">Icons + text</button><button class="${s.sidebarLabels === false ? 'on' : ''}" data-act="sblabels" data-v="0">Icons only</button></div></div>
+  <div class="line"><div class="l"><b>Separate bar</b><span>Detaches the navigation into its own floating bar on the chosen side. Top and Bottom also hold your account.</span></div><label class="sw"><input type="checkbox" id="s-bar" ${s.secondBar ? 'checked' : ''}><i></i></label></div>
+  <div class="line"><div class="l"><b>Liquid glass</b><span>Turns the sidebar (or separate bar) into a floating glass panel. The selected option becomes a glass lens that slides between items. Looks best with a background.</span></div><label class="sw"><input type="checkbox" id="s-glass" ${s.sidebarGlass ? 'checked' : ''}><i></i></label></div>
+  ${s.sidebarGlass ? `<div class="line" data-key="lg-ref"><div class="l"><b>Glass refraction</b><span>How much the glass bends the background behind it. 0 is plain frosted glass.</span></div><div class="row"><input type="range" id="s-lgr" min="0" max="40" value="${s.glassRefract ?? 14}"><b style="width:44px" id="s-lgrv">${s.glassRefract ?? 14}</b></div></div>` : ''}
   <div class="line"><div class="l"><b>Sidebar opacity</b><span>Lower it to see your background through the sidebar and title bar. Both change together so they stay one piece.</span></div><div class="row"><input type="range" id="s-sop" min="0" max="100" value="${s.sidebarOpacity ?? 100}"><b style="width:44px" id="s-sopv">${s.sidebarOpacity ?? 100}%</b></div></div>
   <div class="line"><div class="l"><b>Sidebar blur</b><span>Frosted glass behind the sidebar and title bar. Looks best with a background and a lowered sidebar opacity. Costs some performance.</span></div><div class="row"><input type="range" id="s-sbl" min="0" max="30" value="${s.sidebarBlur || 0}"><b style="width:44px" id="s-sblv">${s.sidebarBlur || 0}px</b></div></div>
   <div class="line"><div class="l"><b>Background</b><span>${hasBg ? (s.bgType === 'video' ? 'Video' : 'Image / GIF') + ' background active' : 'PNG, JPG, WebP, GIF, MP4 or WebM'}</span></div><div class="row">${hasBg ? (s.bgType === 'video' ? `<video data-key="bg-thumb" class="bgthumb" src="${esc(s.bgUrl)}" muted></video>` : `<img data-key="bg-thumb" class="bgthumb" src="${esc(s.bgUrl)}">`) : ''}<button class="btn" data-key="bg-choose" data-act="pickbg">${ic('file')}Choose file…</button>${hasBg ? `<button class="btn" data-key="bg-remove" data-act="clearbg">${ic('trash')}Remove</button>` : ''}</div></div>
@@ -287,13 +315,14 @@ function pgSettingsRaw() {
   <div class="line"><div class="l"><b>Graphics method</b><span>If hardware acceleration keeps failing, try another method. Automatic tests them one after another. The launcher restarts when you change this.</span></div><select id="s-gm">${[['auto', 'Automatic'], ['d3d11', 'Direct3D 11'], ['dcomp', 'Direct3D 11 (no DirectComposition)'], ['gl', 'OpenGL'], ['d3d11on12', 'Direct3D 11 on 12'], ['nosandbox', 'No GPU sandbox'], ['nosandboxall', 'Sandbox off (GPU on)'], ['software', 'Software (no GPU)']].map(([k, l]) => `<option value="${k}" ${g.mode === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div>`;
   return `<div class="page-head"><h1>Settings</h1></div>
   ${appearance}
+  ${window.looksPanel ? looksPanel(s, hasBg) : ''}
   ${themePanel}
   ${smooth}
   <div class="panel"><h2>Performance</h2><div class="line"><div class="l"><b>Default memory</b><span>Per-instance values override this</span></div><div class="row"><input type="range" id="s-ram" min="1024" max="16384" step="256" value="${s.ramMB}"><b id="s-ramv" style="width:70px">${s.ramMB} MB</b></div></div>
   <div class="line"><div class="l"><b>Optimized JVM flags</b><span>G1GC tuning for smoother frame times</span></div><label class="sw"><input type="checkbox" id="s-opt" ${s.optimizedFlags ? 'checked' : ''}><i></i></label></div>
   <div class="line"><div class="l"><b>Global JVM arguments</b></div><input id="s-jvm" value="${esc(s.jvmArgs)}" style="width:320px"></div>
   <div class="line"><div class="l"><b>Parallel downloads</b><span>More = faster installs</span></div><div class="row"><input type="range" id="s-thr" min="2" max="48" value="${s.threads}"><b id="s-thrv" style="width:30px">${s.threads}</b></div></div></div>
-  <div class="panel"><h2>Java</h2>${S.javas.length ? S.javas.map(j => `<div class="dim" style="padding:3px 0">Java ${esc(j.ver)} — ${esc(j.exe)}</div>`).join('') : '<div class="dim">No Java found on this PC yet.</div>'}
+  ${window.backupsPanel ? backupsPanel(s) : ''}${window.storagePanel ? storagePanel() : ''}<div class="panel"><h2>Java</h2>${S.javas.length ? S.javas.map(j => `<div class="dim" style="padding:3px 0">Java ${esc(j.ver)} — ${esc(j.exe)}</div>`).join('') : '<div class="dim">No Java found on this PC yet.</div>'}
   <div class="line"><div class="l"><b>Auto-download the right Java</b><span>Fetches Temurin when an instance needs a version you don't have</span></div><label class="sw"><input type="checkbox" id="s-auto" ${s.autoJava ? 'checked' : ''}><i></i></label></div>
   <div class="row" style="margin-top:6px"><button class="btn sm" data-act="rescan">${ic('refresh')}Rescan</button>${[8, 17, 21].map(m => `<button class="btn sm" data-act="getjava" data-m="${m}">${ic('download')}Java ${m}</button>`).join('')}</div></div>
   <div class="panel"><h2>Launcher</h2>
@@ -339,7 +368,7 @@ function setCreateState() {
 }
 function renderVList() {
   const c = S.cr, el = $('#vlist'); if (!el) return;
-  if (!S.versions.length) { el.innerHTML = '<div class="dim" style="padding:12px">Loading versions… (needs internet)</div><div style="padding:0 12px"><button class="btn sm" data-act="retryver">Retry</button></div>'; setCreateState(); return; }
+  if (!S.versions.length) { el.innerHTML = loadingHtml('Loading versions… (needs internet)') + '<div style="padding:0 12px"><button class="btn sm" data-act="retryver">Retry</button></div>'; setCreateState(); return; }
   if (!c.mc) { const r = S.versions.find(v => v.type === 'release'); if (r) c.mc = r.id; }
   if (c.loader === 'rust') { const r = S.versions.find(v => v.id === RUST_MC); c.mc = r ? RUST_MC : ''; el.innerHTML = r ? `<div class="vi on" data-act="pickver" data-v="${RUST_MC}"><span>${RUST_MC}</span><small>required by Rust</small></div>` : `<div class="dim" style="padding:12px">Minecraft ${RUST_MC} was not found in the version list (needs internet).</div>`; setCreateState(); return; }
   el.innerHTML = S.versions.filter(v => (v.type === 'release' && c.rel) || (v.type === 'snapshot' && c.snap) || (/old/.test(v.type) && c.old)).filter(v => v.id.includes(c.filter))
@@ -369,10 +398,8 @@ function renderJobs(list) {
     const pct = j.total > 0 ? Math.min(100, j.done / j.total * 100) : 0, bar = el.querySelector('.bar'), fill = bar.firstElementChild;
     bar.classList.toggle('ind', !j.finished && j.total <= 0); bar.classList.toggle('done', !!j.finished); fill.style.setProperty('--p', (j.finished ? 100 : pct) / 100);
     const jx = el.querySelector('.jx'); if (el.dataset.fin !== String(!!j.finished)) { el.dataset.fin = String(!!j.finished); jx.innerHTML = j.finished ? `<span class="okmark">${ic('check')}</span>` : `<button class="btn sm icon" data-act="cancel" data-id="${j.id}" title="Cancel">${ic('x')}</button>`; }
-    const p = jobPrev.get(j.id); let speed = p ? p.speed : 0;
-    if (p && now - p.t >= 400) { const inst = (j.bytes - p.b) / ((now - p.t) / 1000); speed = p.speed ? p.speed * 0.6 + inst * 0.4 : inst; jobPrev.set(j.id, { t: now, b: j.bytes, speed }); } else if (!p) jobPrev.set(j.id, { t: now, b: j.bytes, speed: 0 });
     set('.jn', `${j.total > 0 ? `${j.done} / ${j.total} files · ` : ''}${hsize(j.bytes)}`);
-    set('.detail', j.finished ? 'Finished' : `Speed ${speed > 0 ? hsize(speed) + '/s' : '—'} · ${j.total > 0 ? Math.round(pct) + '% of files' : 'preparing…'}`);
+    set('.detail', j.finished ? 'Finished' : (j.total > 0 ? `${Math.round(pct)}% of files` : 'Preparing…'));
   }
   for (const [id, el] of jobEls) if (!seen.has(id)) { el.classList.add('leave'); jobEls.delete(id); jobPrev.delete(id); setTimeout(() => el.remove(), 260); }
 }
@@ -394,6 +421,7 @@ document.addEventListener('click', async e => {
   else if (t.tagName === 'INPUT') return;
   e.stopPropagation(); if (!['menu', 'acctmenu'].includes(a)) closePop();
   switch (a) {
+    case 'winstyle': if (t.dataset.v !== (S.settings.winRounded ? 'rounded' : 'classic') && confirm('The launcher will restart to change the window style. Continue?')) call('setWinStyle', t.dataset.v); break;
     case 'min': call('winMin'); break; case 'max': call('winMax'); break; case 'close': call('winClose'); break;
     case 'nav': go(t.dataset.p); break;
     case 'acctmenu': acctMenu(t); break;
@@ -447,7 +475,8 @@ document.addEventListener('click', async e => {
     case 'skinmodel': S.skin.model = t.dataset.v; render(); break;
     case 'skinpick': { const r = await call('pickSkinFile'); if (r && r.err) toast(r.err, true); else if (r && r.id) { await loadSkinLib(); S.skin.sel = r.id; render(); } break; }
     case 'skinimport': { const n = ($('#skinname').value || '').trim(); if (!n) { toast('Type a player name first', true); break; } t.disabled = true; const r = await call('importSkinByName', n); t.disabled = false; if (r.err) toast(r.err, true); else { await loadSkinLib(); S.skin.sel = r.id; S.skin.model = r.model || 'classic'; render(); } break; }
-    case 'skinapply': { const r = await call('applySkin', { id: S.skin.sel, model: S.skin.model }); if (r.err) toast(r.err, true); else { toast(r.online ? 'Skin uploaded to your Microsoft account' : 'Skin saved. It shows in your next launch'); S.skin.sel = null; } render(); break; }
+    case 'skinapply': { const r = await call('applySkin', { id: S.skin.sel, model: S.skin.model }); if (r.err) toast(r.err, true); else { toast(r.online ? 'Skin uploaded to your Microsoft account' : 'Skin saved. It shows in your next launch'); } render(); break; }
+    case 'skindel': { const sk = S.skin.lib.find(x => x.id === S.skin.sel); if (!sk || !confirm('Delete this skin from your library? Your account keeps wearing it until you apply another one.')) break; const r = await call('deleteSkin', sk.id); if (r && r.err) toast(r.err, true); else { toast('Skin deleted'); S.skin.sel = null; await loadSkinLib(); } render(); break; }
     case 'skinreset': { const r = await call('resetSkin'); if (r.err) toast(r.err, true); else toast('Skin reset'); S.skin.sel = null; render(); break; }
     case 'solidacc': await call('saveSettings', { accentB: S.settings.accentA }); break;
     case 'resetpanel': await call('saveSettings', { panelColor: '#12151c', appColor: '#0b0d12' }); break;
@@ -471,8 +500,10 @@ document.addEventListener('input', e => {
   else if (t.id === 'i-ram') { $('#i-ramv').textContent = t.value + ' MB'; }
   else if (t.id === 'ol-op') { S.settings.outlineOpacity = +t.value; $('#ol-opv').textContent = t.value + '%'; applyTheme(); }
   else if (t.id === 'ol-sz') { S.settings.outlineSize = +t.value; $('#ol-szv').textContent = t.value + 'px'; applyTheme(); }
+  else if (t.id === 'win-r') { S.settings.winRadius = +t.value; $('#win-rv').textContent = t.value + 'px'; applyTheme(); }
   else if (t.id === 's-sop') { S.settings.sidebarOpacity = +t.value; $('#s-sopv').textContent = t.value + '%'; applyTheme(); }
   else if (t.id === 's-sbl') { S.settings.sidebarBlur = +t.value; $('#s-sblv').textContent = t.value + 'px'; applyTheme(); }
+  else if (t.id === 's-lgr') { S.settings.glassRefract = +t.value; $('#s-lgrv').textContent = t.value; applyTheme(); }
   else if (t.id === 'bg-pb') { S.settings.panelBlur = +t.value; $('#bg-pbv').textContent = t.value + 'px'; applyTheme(); }
   else if (t.id === 'bg-dim') { S.settings.bgDim = +t.value; $('#bg-dimv').textContent = t.value + '%'; applyTheme(); }
   else if (t.id === 'bg-blur') { S.settings.bgBlur = +t.value; $('#bg-blurv').textContent = t.value + 'px'; applyTheme(); }
@@ -484,8 +515,8 @@ document.addEventListener('change', async e => {
   const t = e.target, i = inst(S.sel), d = S.disc;
   const m = { 'd-': 0 };
   if (t.id === 'consrc') { S.conSrc = t.value; afterConsole(); } else if (t.id === 'dtarget') setTarget(t.value); else if (t.id === 'dmc') { d.mc = t.value; d.offset = 0; runSearch(); } else if (t.id === 'dloader') { d.loader = t.value; d.offset = 0; runSearch(); } else if (t.id === 'dsort') { d.sort = t.value; d.offset = 0; runSearch(); }
-  else if (t.id === 'ol-op') call('saveSettings', { outlineOpacity: +t.value }); else if (t.id === 'ol-sz') call('saveSettings', { outlineSize: +t.value }); else if (t.id === 'olc') call('saveSettings', { outlineColor: t.value });
-  else if (t.id === 's-sop') call('saveSettings', { sidebarOpacity: +t.value }); else if (t.id === 's-sbl') call('saveSettings', { sidebarBlur: +t.value }); else if (t.id === 's-gm') { toast('Restarting to apply…'); setTimeout(() => call('setGpuMode', t.value), 500); } else if (t.id === 'bg-pb') call('saveSettings', { panelBlur: +t.value });
+  else if (t.id === 'ol-op') call('saveSettings', { outlineOpacity: +t.value }); else if (t.id === 'ol-sz') call('saveSettings', { outlineSize: +t.value }); else if (t.id === 'win-r') call('saveSettings', { winRadius: +t.value }); else if (t.id === 'olc') call('saveSettings', { outlineColor: t.value });
+  else if (t.id === 's-sop') call('saveSettings', { sidebarOpacity: +t.value }); else if (t.id === 's-sbl') call('saveSettings', { sidebarBlur: +t.value }); else if (t.id === 's-lgr') call('saveSettings', { glassRefract: +t.value }); else if (t.id === 's-bar') call('saveSettings', { secondBar: t.checked }); else if (t.id === 's-glass') call('saveSettings', { sidebarGlass: t.checked }); else if (t.id === 's-gm') { toast('Restarting to apply…'); setTimeout(() => call('setGpuMode', t.value), 500); } else if (t.id === 'bg-pb') call('saveSettings', { panelBlur: +t.value });
   else if (t.id === 'bg-dim') call('saveSettings', { bgDim: +t.value }); else if (t.id === 'bg-blur') call('saveSettings', { bgBlur: +t.value }); else if (t.id === 'bg-pa') call('saveSettings', { panelOpacity: +t.value });
   else if (t.id === 'ca') call('saveSettings', { accentA: t.value }); else if (t.id === 'cb') call('saveSettings', { accentB: t.value });
   else if (t.id === 'pc') call('saveSettings', { panelColor: t.value }); else if (t.id === 'wc') call('saveSettings', { appColor: t.value });
@@ -521,6 +552,8 @@ window.oc.on('console', ({ id, lines }) => {
 window.oc.on('log', ({ lines }) => { if (S.page === 'console' && S.conSrc === 'launcher') pushCon(lines); });
 
 (async () => {
+  // Wait until every script (servers.js, accounts.js, extras.js...) has run, so the first render can use all pages.
+  if (document.readyState !== 'complete') await new Promise(r => window.addEventListener('load', r, { once: true }));
   const st = await call('init'); Object.assign(S, st); applyTheme(); renderSide(); S.running = st.running || {}; render();
 })();
 
@@ -575,7 +608,8 @@ document.addEventListener('keydown', ev => {
   else if (ev.key.length === 1) { dd.typed += ev.key.toLowerCase(); clearTimeout(dd.t); dd.t = setTimeout(() => { if (dd) dd.typed = ''; }, 700); const i = [...dd.sel.options].findIndex(o => o.textContent.toLowerCase().startsWith(dd.typed)); if (i >= 0) move(i); }
 }, true);
 let uiRaf = 0;
-new MutationObserver(() => { if (uiRaf) return; uiRaf = requestAnimationFrame(() => { uiRaf = 0; enhanceSelects(); initIndicators(); }); }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
+const quietUi = m => m.target.closest && m.target.closest('#con,#jobs,#tooltip,#fx');
+new MutationObserver(ms => { if (uiRaf || ms.every(quietUi)) return; uiRaf = requestAnimationFrame(() => { uiRaf = 0; enhanceSelects(); initIndicators(); }); }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
 document.addEventListener('click', () => requestAnimationFrame(initIndicators), true);
 
 
@@ -669,7 +703,7 @@ function renderDrawer() {
   else body = D.data.versions.map(v => `<div class="ver" data-key="ver:${esc(v.id)}"><div class="grow"><div><b>${esc(v.name || v.number)}</b> <span class="vt ${esc(v.type)}">${esc(v.type)}</span></div><div class="dim" style="font-size:12.5px">${esc(v.number)} · ${v.games.slice(-4).reverse().map(esc).join(', ')}${v.games.length > 4 ? '…' : ''} · ${v.loaders.map(l => esc(LN(l))).join(', ')} · ${fmtDate(v.date)} · ${hcount(v.downloads)} downloads</div></div>${installing || (!packs && installed) ? '' : `<button class="btn sm" data-act="dver" data-v="${esc(v.id)}">${ic('download')}${packs ? 'Install' : 'Get'}</button>`}</div>`).join('') || '<div class="dim">No versions.</div>';
   const keep = dr.querySelector('.dr-body'), scroll = keep ? keep.scrollTop : 0, sameTab = dr.dataset.tab === D.tab && dr.dataset.id === D.id;
   dr.dataset.tab = D.tab; dr.dataset.id = D.id;
-  morph(dr, `<header class="dr-head" data-key="dr-head"><div class="pic" style="background:${icon ? 'none' : 'var(--grad)'};width:68px;height:68px">${icon ? `<img class="pimg" data-l="${letter(title)}" src="${esc(icon)}" width="68" height="68" style="object-fit:contain">` : letter(title)}</div><div class="grow"><h2>${esc(title)}</h2><div class="dim">${esc(desc)}</div></div><button class="btn icon" data-act="closedetail" title="Close">${ic('x')}</button></header>
+  morph(dr, `<header class="dr-head" data-key="dr-head"><div class="pic" style="background:${icon ? 'none' : 'var(--grad)'};width:68px;height:68px">${icon ? `<img class="pimg" loading="lazy" decoding="async" data-l="${letter(title)}" src="${esc(icon)}" width="68" height="68" style="object-fit:contain">` : letter(title)}</div><div class="grow"><h2>${esc(title)}</h2><div class="dim">${esc(desc)}</div></div><button class="btn icon" data-act="closedetail" title="Close">${ic('x')}</button></header>
   <div class="dr-bar" data-key="dr-bar"><div class="stat-row"><span>${ic('dl')}${hcount(p ? p.downloads : (h.downloads || 0))} downloads</span>${p ? `<span>${ic('heart')}${hcount(p.followers)} followers</span>` : ''}</div><div class="grow"></div>${btn}</div>
   ${links ? `<div class="dr-links" data-key="dr-links">${links}</div>` : ''}
   <div class="tabs" data-key="dr-tabs" style="margin:6px 0 0">${tabs.map(([k, l]) => `<button class="${D.tab === k ? 'on' : ''}" data-act="dtab" data-t="${k}">${l}</button>`).join('')}</div><div class="dr-body" data-key="dr-body">${body}</div>`, { animate: false });
@@ -740,16 +774,16 @@ async function loadSkinLib() { S.skin.lib = (await call('skinLibrary')) || []; }
 function pgSkins() {
   const s = S.settings, name = s.username, ms = (s.msAccounts || []).find(x => x.id === s.activeMs), k = S.skin;
   if (!name) return `<div class="page-head"><h1>Skins</h1></div><div class="empty"><div><h3>Add an account first</h3><div>Skins belong to an account. Add one from the top-right corner.</div></div></div>`;
-  const cur = ms ? { url: ms.skinUrl, model: ms.skinModel } : (s.skins && s.skins[name]) || {}, sel = k.sel && k.lib.find(x => x.id === k.sel), url = sel ? sel.url : (cur.url || ''), model = sel ? k.model : (cur.model || 'classic');
+  const cur = ms ? { url: ms.skinUrl, model: ms.skinModel } : (s.skins && s.skins[name]) || {}, inUse = ms ? ms.skinId : (cur.id || ''), sel = k.sel && k.lib.find(x => x.id === k.sel), url = sel ? sel.url : (cur.url || ''), model = sel ? k.model : (cur.model || 'classic');
   const note = ms ? 'Your skin is uploaded to your Microsoft account, so everyone sees it in online games.' : 'Offline accounts have no real skin. OfflineCraft shows yours to you with a small resource pack. Other players still see a default skin.';
   return `<div class="page-head"><h1>Skins</h1><span class="dim ellip">${esc(name)} \u00b7 ${ms ? 'Microsoft account' : 'Offline account'}</span></div>
   <div class="skin-grid"><div class="panel skin-prev" data-key="skin-prev"><div class="sk3d" id="sk3d" data-morph="skip" data-url="${esc(url)}" data-model="${model}"></div>
     <div class="sk-hint">${url ? 'Drag to rotate \u00b7 scroll to zoom \u00b7 double-click to reset' : 'No skin chosen yet \u2014 pick one from the library'}</div>
     <div class="sk-tools"><div class="seg"><button class="${model === 'classic' ? 'on' : ''}" data-act="skinmodel" data-v="classic">Classic</button><button class="${model === 'slim' ? 'on' : ''}" data-act="skinmodel" data-v="slim">Slim</button></div>
     <div class="sk-toggles"><label class="tgl"><span>Auto-spin</span><span class="sw"><input type="checkbox" data-act="sk3dt" data-v="auto" ${k.auto ? 'checked' : ''}><i></i></span></label><label class="tgl"><span>Walking animation</span><span class="sw"><input type="checkbox" data-act="sk3dt" data-v="walk" ${k.walk ? 'checked' : ''}><i></i></span></label></div></div>
-    <div class="row"><button class="btn primary" data-act="skinapply" ${sel ? '' : 'disabled'}>Apply skin</button><button class="btn" data-act="skinreset" ${cur.url ? '' : 'disabled'}>Reset</button></div><div class="dim note">${note}</div></div>
+    <div class="row"><button class="btn primary" data-act="skinapply" ${sel && sel.id !== inUse ? '' : 'disabled'}>${sel && sel.id === inUse ? 'In use' : 'Apply skin'}</button><button class="btn" data-act="skinreset" ${cur.url ? '' : 'disabled'}>Reset</button><button class="btn danger" data-act="skindel" ${sel ? '' : 'disabled'}>${ic('trash')}Delete</button></div><div class="dim note">${note}</div></div>
   <div class="panel" data-key="skin-lib"><h2>Skin library</h2><div class="skin-add"><button class="btn" data-act="skinpick">${ic('file')}Choose file\u2026</button><div class="skin-get"><input id="skinname" placeholder="Player username" maxlength="16"><button class="btn" data-act="skinimport">${ic('download')}Copy skin</button></div></div>
-  <div class="skin-lib">${k.lib.map(l => `<button class="skin-th ${k.sel === l.id ? 'on' : ''}" data-key="sk:${l.id}" data-act="skinsel" data-id="${l.id}"><div class="face-big facebg" style="background-image:${cssUrl(l.url)},${cssUrl(l.url)}"></div></button>`).join('') || '<div class="dim empty-lib">No skins yet. Choose a PNG file or copy a player\'s skin by username.</div>'}</div></div></div>`;
+  <div class="skin-lib">${k.lib.map(l => `<button class="skin-th ${k.sel === l.id ? 'on' : ''} ${inUse === l.id ? 'inuse' : ''}" data-key="sk:${l.id}" data-act="skinsel" data-id="${l.id}">${inUse === l.id ? '<span class="sk-badge">In use</span>' : ''}<div class="face-big facebg" style="background-image:${cssUrl(l.url)},${cssUrl(l.url)}"></div></button>`).join('') || '<div class="dim empty-lib">No skins yet. Choose a PNG file or copy a player\'s skin by username.</div>'}</div></div>${window.capesPanel ? capesPanel() : ''}</div>`;
 }
 function afterSkins() {
   const w = $('#sk3d'); if (!w) return;
@@ -787,3 +821,37 @@ document.addEventListener('dragend', () => { if (navDown) { navDown = null; sync
   }).observe(app, { childList: true, subtree: true });
 })();
 call('winIsMax').then(m => document.documentElement.classList.toggle('maxed', !!m)).catch(() => {});
+// Resize grips on every edge and corner. Rounded window: they fill the transparent margin around the app, so the grab area is OUTSIDE
+// the window. Classic window: thin strips inside the edge, above the title bar's drag area (which swallows the top edge).
+(function resizeGrips() {
+  const MINW = () => 1000 + 2 * margin(), MINH = () => 640 + 2 * margin(), margin = () => (S.settings.winRounded ? (S.settings.winMargin || 14) : 0);
+  const DIRS = [['n', 'ns-resize'], ['s', 'ns-resize'], ['w', 'ew-resize'], ['e', 'ew-resize'], ['nw', 'nwse-resize'], ['ne', 'nesw-resize'], ['sw', 'nesw-resize'], ['se', 'nwse-resize']], grips = {};
+  const geom = d => {   // css for one grip
+    const m = margin(), E = m || 5, C = m ? m + 4 : 10, T = m || 4;
+    return { n: `top:0;left:${C}px;right:${C}px;height:${T}px`, s: `bottom:0;left:${C}px;right:${C}px;height:${E}px`, w: `left:0;top:${C}px;bottom:${C}px;width:${E}px`, e: `right:0;top:${C}px;bottom:${C}px;width:${E}px`,
+      nw: `top:0;left:0;width:${C}px;height:${C}px`, ne: `top:0;right:0;width:${C}px;height:${C}px`, sw: `bottom:0;left:0;width:${C}px;height:${C}px`, se: `bottom:0;right:0;width:${C}px;height:${C}px` }[d];
+  };
+  const layout = () => { const maxed = document.documentElement.classList.contains('maxed'), native = !S.settings.winRounded && false; for (const [d, cur] of DIRS) { const g = grips[d]; g.style.cssText = `position:fixed;z-index:99999;-webkit-app-region:no-drag;cursor:${cur};${geom(d)};${maxed ? 'display:none' : ''}`; } };
+  for (const [dir] of DIRS) {
+    const g = document.createElement('div'); g.className = 'rsz'; grips[dir] = g; document.documentElement.appendChild(g);
+    g.addEventListener('pointerdown', async e => {
+      if (e.button !== 0 || document.documentElement.classList.contains('maxed')) return; e.preventDefault(); g.setPointerCapture(e.pointerId);
+      const b = await call('winGetBounds'), sx = e.screenX, sy = e.screenY, mw = MINW(), mh = MINH(); let raf = 0, next = null;
+      const move = ev => {
+        const dx = ev.screenX - sx, dy = ev.screenY - sy; let { x, y, width: w, height: h } = b;
+        if (dir.includes('e')) w = Math.max(mw, b.width + dx);
+        if (dir.includes('s')) h = Math.max(mh, b.height + dy);
+        if (dir.includes('w')) { w = Math.max(mw, b.width - dx); x = b.x + b.width - w; }
+        if (dir.includes('n')) { h = Math.max(mh, b.height - dy); y = b.y + b.height - h; }
+        next = { x, y, width: w, height: h }; if (!raf) raf = requestAnimationFrame(() => { raf = 0; if (next) call('winSetBounds', next); });
+      };
+      const up = () => { g.removeEventListener('pointermove', move); g.removeEventListener('pointerup', up); g.removeEventListener('pointercancel', up); };
+      g.addEventListener('pointermove', move); g.addEventListener('pointerup', up); g.addEventListener('pointercancel', up);
+    });
+  }
+  window.layoutGrips = layout; layout();
+  new MutationObserver(layout).observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+  // the transparent window has no native double-click-to-maximize
+  const tb = document.getElementById('titlebar'); if (tb) tb.addEventListener('dblclick', e => { if (!S.settings.winRounded || e.target.closest('.nodrag,button,input,select')) return; call('winMax'); });
+})();
+

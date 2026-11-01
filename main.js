@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, shell, dialog, safeStorage } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, dialog, safeStorage, clipboard, nativeImage, screen } = require('electron');
 const path = require('path'), fs = require('fs'), fsp = fs.promises, cp = require('child_process'), crypto = require('crypto');
 const { pathToFileURL } = require('url');
 const { Readable } = require('stream'), { pipeline } = require('stream/promises');
@@ -58,7 +58,7 @@ process.on('unhandledRejection', e => { LOG('UNHANDLED: ' + ((e && e.stack) || e
 // ---------------- settings / instances ----------------
 const DEF = { username: '', accounts: [], ramMB: 4096, optimizedFlags: true, autoJava: true, minimizeOnLaunch: false, threads: 16, accent: 0, jvmArgs: '',
   accentA: '#34d399', accentB: '#22d3ee', sidebarPos: 'left', sidebarLabels: true, bgFile: '', bgType: 'none', bgVer: 0, bgDim: 45, bgBlur: 0, panelOpacity: 88,
-  panelColor: '#12151c', appColor: '#0b0d12', animations: true, bgPauseUnfocused: true, gpuMode: 'auto', panelBlur: 0, sidebarOpacity: 100, sidebarBlur: 0, outlineColor: '#ffffff', outlineOpacity: 30, outlineSize: 2, msAccounts: [], activeMs: '', skins: {}, servers: [] };
+  panelColor: '#12151c', appColor: '#0b0d12', animations: true, bgPauseUnfocused: true, gpuMode: 'auto', panelBlur: 0, sidebarOpacity: 100, sidebarBlur: 0, sidebarGlass: false, glassRefract: 14, secondBar: false, accentAuto: false, glassAll: false, barAutoHide: false, uiScale: 100, density: 'comfortable', fontFamily: 'default', fontPixel: false, cardStyle: 'grid', glow: 100, ambient: 'off', ambientAmount: 50, navOrder: [], navHidden: [], outlineColor: '#ffffff', outlineOpacity: 30, outlineSize: 2, winStyle: 'rounded', winRadius: 12, msAccounts: [], activeMs: '', skins: {}, servers: [] };
 let settings = { ...DEF, ...readJson(P('settings.json')) };
 if (settings.username && !settings.activeMs && !settings.accounts.includes(settings.username)) settings.accounts.unshift(settings.username);
 if (!settings.v3) { if (settings.accounts.length === 1 && settings.accounts[0] === 'Player') { settings.accounts = []; settings.username = ''; } settings.v3 = true; }
@@ -66,6 +66,10 @@ if (!settings.v2) { settings.minimizeOnLaunch = false; settings.v2 = true; }
 const saveSettings = () => writeJson(P('settings.json'), settings);
 const START_MARK = path.join(ROOT, '.starting'), SAFE_FILE = path.join(ROOT, 'safe-level.json');
 let level = 0, fails = 0;
+// Rounded window = transparent frameless window with a transparent margin (WIN_M) around the visible app: the outline is drawn in that margin
+// (outside the content), corners are CSS, and the margin is where the resize grips live. Needs hardware compositing, so it falls back to the classic window.
+const WIN_M = 14; let ROUNDED = false;
+const wantRounded = () => settings.winStyle !== 'classic' && settings.gpuMode !== 'software' && level < 6 && !process.argv.includes('--classic-window');
 try { level = readJson(SAFE_FILE, {}).level || 0; } catch {}
 try { fails = parseInt(fs.readFileSync(START_MARK, 'utf8')) || 0; } catch {}
 if (fails > 6) fails = 1;
@@ -107,10 +111,11 @@ const busy = new Set();
 function rmLater(p, tries = 10) { try { fs.rmSync(p, { force: true }); } catch { if (tries > 0) setTimeout(() => rmLater(p, tries - 1), 1500); } }
 const bgUrl = () => (settings.bgFile && exists(P('backgrounds', settings.bgFile))) ? pathToFileURL(P('backgrounds', settings.bgFile)).href + '?v=' + (settings.bgVer || 0) : '';
 const skinFile = id => P('skins', 'lib', id + '.png');
-const rs = () => ({ ...settings, msAccounts: (settings.msAccounts || []).map(a => ({ id: a.id, name: a.name, skinModel: a.skinModel, skinUrl: (a.skinCache && exists(path.join(P('skins', 'cache'), a.skinCache + '.png'))) ? pathToFileURL(path.join(P('skins', 'cache'), a.skinCache + '.png')).href : a.skinUrl })), skins: Object.fromEntries(Object.entries(settings.skins || {}).filter(([, s]) => exists(skinFile(s.id))).map(([n, s]) => [n, { ...s, url: pathToFileURL(skinFile(s.id)).href }])), bgUrl: bgUrl() });
+const rs = () => ({ ...settings, winRounded: ROUNDED, winMargin: WIN_M, msAccounts: (settings.msAccounts || []).map(a => { const ap = a.appliedSkin && exists(skinFile(a.appliedSkin.id)) ? a.appliedSkin : null, cf = a.skinCache && path.join(P('skins', 'cache'), a.skinCache + '.png'); return { id: a.id, name: a.name, skinId: ap ? ap.id : '', skinModel: ap ? ap.model : a.skinModel, skinUrl: ap ? pathToFileURL(skinFile(ap.id)).href : (cf && exists(cf)) ? pathToFileURL(cf).href : a.skinUrl }; }), skins: Object.fromEntries(Object.entries(settings.skins || {}).filter(([, s]) => exists(skinFile(s.id))).map(([n, s]) => [n, { ...s, url: pathToFileURL(skinFile(s.id)).href }])), bgUrl: bgUrl() });
 const instAsset = (i, f) => f && exists(path.join(instDir(i), f)) ? pathToFileURL(path.join(instDir(i), f)).href + '?v=' + (i.assetVer || 0) : '';
 const viewInst = i => ({ ...i, iconUrl: instAsset(i, i.iconFile), coverUrl: instAsset(i, i.coverFile) });
 let pushTimer = null;
+const applyZoom = () => { try { if (win && !win.isDestroyed()) win.webContents.setZoomFactor(Math.max(0.8, Math.min(1.25, (+settings.uiScale || 100) / 100))); } catch {} };
 function pushState() { if (pushTimer) return; pushTimer = setTimeout(() => { pushTimer = null; doPushState(); }, 25); }
 function doPushState() {
   const r = {}; for (const [id, x] of running) if (x.alive) r[id] = true;
@@ -549,7 +554,7 @@ function msAuthWindow() {
 async function ensureMsToken() {
   if (!settings.activeMs) return; const a = (settings.msAccounts || []).find(x => x.id === settings.activeMs); if (!a) { settings.activeMs = ''; return; }
   if (Date.now() < a.mcExpires) return;
-  try { const tok = await msTokenRequest({ grant_type: 'refresh_token', refresh_token: decTok(a.refresh) }); const n = await msChain(tok.access_token); a.name = n.name; a.mcToken = encTok(n.mcToken); a.mcExpires = n.mcExpires; a.skinUrl = n.skinUrl; a.skinModel = n.skinModel; if (tok.refresh_token) a.refresh = encTok(tok.refresh_token); settings.username = n.name; saveSettings(); cacheMsSkins(); }
+  try { const tok = await msTokenRequest({ grant_type: 'refresh_token', refresh_token: decTok(a.refresh) }); const n = await msChain(tok.access_token); a.name = n.name; a.mcToken = encTok(n.mcToken); a.mcExpires = n.mcExpires; { const ap = a.appliedSkin; if (ap && exists(skinFile(ap.id)) && ((ap.url && n.skinUrl === ap.url) || Date.now() - ap.at < 15 * 60 * 1000)) { /* keep the skin we applied */ } else { a.skinUrl = n.skinUrl; a.skinModel = n.skinModel; if (ap) delete a.appliedSkin; } } if (tok.refresh_token) a.refresh = encTok(tok.refresh_token); settings.username = n.name; saveSettings(); cacheMsSkins(); }
   catch (e) { throw new Error('Your Microsoft login expired, please sign in again (' + e.message + ')'); }
 }
 
@@ -671,7 +676,7 @@ function listContent(inst, kind) {
   let names = []; try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch {}
   for (const e of names) {
     const f = e.name;
-    if (kind === 'world') { if (e.isDirectory()) out.push({ file: f, title: f, enabled: true, size: 0, dir: true }); continue; }
+    if (kind === 'world') { if (e.isDirectory()) { let icon = '', mt = 0; try { icon = 'data:image/png;base64,' + fs.readFileSync(path.join(dir, f, 'icon.png')).toString('base64'); } catch {} try { mt = fs.statSync(path.join(dir, f, 'level.dat')).mtimeMs; } catch { try { mt = fs.statSync(path.join(dir, f)).mtimeMs; } catch {} } out.push({ file: f, title: f, enabled: true, size: 0, dir: true, icon, mtime: mt }); } continue; }
     const dis = f.endsWith('.disabled'), base = dis ? f.slice(0, -9) : f, r = rec[base] || {};
     out.push({ file: f, title: r.title || base, ver: r.version || '', icon: r.icon || '', enabled: !dis, size: e.isDirectory() ? 0 : fsize(path.join(dir, f)), dir: e.isDirectory() });
   }
@@ -700,7 +705,8 @@ async function updateMods(inst, j) {
 // ---------------- API exposed to renderer ----------------
 
 // ---- theme files (.theme = JSON) ----
-const THEME_SPEC = { accentA: 'hex', accentB: 'hex', panelColor: 'hex', appColor: 'hex', outlineColor: 'hex', sidebarPos: ['left', 'right', 'top'], sidebarLabels: 'bool', animations: 'bool', bgPauseUnfocused: 'bool', bgDim: [0, 90], bgBlur: [0, 30], panelOpacity: [30, 100], panelBlur: [0, 30], sidebarOpacity: [0, 100], sidebarBlur: [0, 30], outlineOpacity: [0, 100], outlineSize: [0, 8] };
+const NAV_IDS = ['library', 'discover', 'skins', 'accounts', 'host'];
+const THEME_SPEC = { accentA: 'hex', accentB: 'hex', panelColor: 'hex', appColor: 'hex', outlineColor: 'hex', sidebarPos: ['left', 'right', 'top', 'bottom'], sidebarLabels: 'bool', animations: 'bool', bgPauseUnfocused: 'bool', bgDim: [0, 90], bgBlur: [0, 30], panelOpacity: [30, 100], panelBlur: [0, 30], sidebarOpacity: [0, 100], sidebarBlur: [0, 30], sidebarGlass: 'bool', glassRefract: [0, 40], secondBar: 'bool', accentAuto: 'bool', glassAll: 'bool', barAutoHide: 'bool', uiScale: [80, 125], density: ['comfortable', 'compact'], fontFamily: ['default', 'inter', 'system'], fontPixel: 'bool', cardStyle: ['grid', 'list', 'compact'], glow: [0, 200], ambient: ['off', 'snow', 'fireflies', 'ash'], ambientAmount: [10, 100], navOrder: { list: NAV_IDS }, navHidden: { list: NAV_IDS.filter(x => x !== 'library') }, outlineOpacity: [0, 100], outlineSize: [0, 8] };
 const BG_EXTS = ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.mp4', '.webm', '.m4v'], VIDEO_EXTS = ['.mp4', '.webm', '.m4v'];
 function cleanTheme(src) {
   const o = {};
@@ -708,6 +714,7 @@ function cleanTheme(src) {
     const v = src[k]; if (v === undefined || v === null) continue;
     if (spec === 'hex') { if (typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v)) o[k] = v.toLowerCase(); }
     else if (spec === 'bool') { if (typeof v === 'boolean') o[k] = v; }
+    else if (spec.list) { if (Array.isArray(v)) o[k] = [...new Set(v.filter(x => spec.list.includes(x)))]; }
     else if (typeof spec[0] === 'string') { if (spec.includes(v)) o[k] = v; }
     else if (Number.isFinite(+v)) o[k] = Math.max(spec[0], Math.min(spec[1], Math.round(+v)));
   }
@@ -717,6 +724,7 @@ function cleanTheme(src) {
 const api = {
   async init() { loadInstances(); if (!javas.length) setTimeout(scanJavas, 50); loadManifest().then(() => send('versions', manifest)); return { gfx: { mode: settings.gpuMode, level, status: readJson(P('gpu-status.json'), null) }, settings: rs(), instances: instances.map(viewInst), root: ROOT, running: {}, busy: [], versions: manifest, javas }; },
   versions: async () => manifest.length ? manifest : loadManifest(),
+  applyZoom: () => { applyZoom(); return true; },
   saveSettings: s => { settings = { ...settings, ...s }; if (settings.username && !settings.activeMs && !settings.accounts.includes(settings.username)) settings.accounts.push(settings.username); saveSettings(); pushState(); return rs(); },
   uuid: n => offlineUuid(n),
   async msLogin() {
@@ -745,6 +753,13 @@ const api = {
     } catch {}
     return null;
   },
+  deleteSkin(id) {
+    if (!/^[0-9a-f]{8,40}$/.test(String(id))) return { err: 'Unknown skin' };
+    fs.rmSync(skinFile(id), { force: true });
+    for (const [n, sk] of Object.entries(settings.skins || {})) if (sk.id === id) delete settings.skins[n];
+    for (const a of settings.msAccounts || []) if (a.appliedSkin && a.appliedSkin.id === id) delete a.appliedSkin;
+    saveSettings(); pushState(); return { ok: true };
+  },
   skinLibrary() { try { return fs.readdirSync(P('skins', 'lib')).filter(f => f.endsWith('.png')).map(f => skinEntry(f.slice(0, -4))); } catch { return []; } },
   async pickSkinFile() {
     const r = await dialog.showOpenDialog(win, { title: 'Choose a skin', filters: [{ name: 'Minecraft skin (PNG)', extensions: ['png'] }], properties: ['openFile'] }); if (r.canceled) return null;
@@ -765,16 +780,22 @@ const api = {
       if (settings.activeMs) {
         await ensureMsToken(); const a = (settings.msAccounts || []).find(x => x.id === settings.activeMs), fd = new FormData();
         fd.append('variant', model === 'slim' ? 'slim' : 'classic'); fd.append('file', new Blob([fs.readFileSync(skinFile(id))], { type: 'image/png' }), 'skin.png');
-        const r = await fetch('https://api.minecraftservices.com/minecraft/profile/skins', { method: 'POST', headers: { Authorization: 'Bearer ' + decTok(a.mcToken), 'User-Agent': UA }, body: fd });
-        if (!r.ok) throw new Error('Mojang rejected the skin (HTTP ' + r.status + ')');
+        const variant = model === 'slim' ? 'slim' : 'classic', post = () => { const f2 = new FormData(); f2.append('variant', variant); f2.append('file', new Blob([fs.readFileSync(skinFile(id))], { type: 'image/png' }), 'skin.png'); return fetch('https://api.minecraftservices.com/minecraft/profile/skins', { method: 'POST', headers: { Authorization: 'Bearer ' + decTok(a.mcToken), 'User-Agent': UA }, body: f2 }); };
+        let r = await post(); if (r.status === 401) { a.mcExpires = 0; await ensureMsToken(); r = await post(); }
+        if (!r.ok) {
+          let msg = ''; try { const jj = JSON.parse(await r.text()); msg = jj.errorMessage || jj.error || ''; } catch {}
+          throw new Error(r.status === 429 ? 'Mojang says skins are being changed too often. Wait a minute and try again.' : r.status === 401 || r.status === 403 ? 'Mojang refused the login. Sign in again from the account menu at the top right.' : `Mojang rejected the skin (HTTP ${r.status})${msg ? ': ' + msg : ''}`);
+        }
         const j = await r.json().catch(() => ({})), sk = (j.skins || []).find(s => s.state === 'ACTIVE'); if (sk) { a.skinUrl = sk.url; a.skinModel = String(sk.variant).toUpperCase() === 'SLIM' ? 'slim' : 'classic'; }
+        // Remember what was applied: Mojang's profile can lag behind for a while, and it must not bring the old skin back on screen.
+        a.appliedSkin = { id, model: variant, at: Date.now(), url: sk ? sk.url : '' }; a.skinCache = ''; a.skinCacheUrl = '';
       } else { settings.skins = { ...(settings.skins || {}), [settings.username]: { id, model: model === 'slim' ? 'slim' : 'classic' } }; }
       saveSettings(); pushState(); cacheMsSkins(); return { ok: true, online: !!settings.activeMs };
     } catch (e) { return { err: e.message || String(e) }; }
   },
   async resetSkin() {
     try {
-      if (settings.activeMs) { await ensureMsToken(); const a = (settings.msAccounts || []).find(x => x.id === settings.activeMs); const r = await fetch('https://api.minecraftservices.com/minecraft/profile/skins/active', { method: 'DELETE', headers: { Authorization: 'Bearer ' + decTok(a.mcToken), 'User-Agent': UA } }); if (!r.ok) throw new Error('Mojang refused (HTTP ' + r.status + ')'); a.skinUrl = ''; }
+      if (settings.activeMs) { await ensureMsToken(); const a = (settings.msAccounts || []).find(x => x.id === settings.activeMs); const r = await fetch('https://api.minecraftservices.com/minecraft/profile/skins/active', { method: 'DELETE', headers: { Authorization: 'Bearer ' + decTok(a.mcToken), 'User-Agent': UA } }); if (!r.ok) throw new Error('Mojang refused (HTTP ' + r.status + ')'); a.skinUrl = ''; a.skinCache = ''; a.skinCacheUrl = ''; delete a.appliedSkin; }
       else { const s = { ...(settings.skins || {}) }; delete s[settings.username]; settings.skins = s; }
       saveSettings(); pushState(); return { ok: true };
     } catch (e) { return { err: e.message || String(e) }; }
@@ -869,22 +890,26 @@ const api = {
     const err = await startJob('Launching ' + inst.name, async j => {
      try {
       if (!quickCheck(inst)) { await prepareInstance(inst, j); saveInst(inst); }
+      try { stage(j, 'Backing up worlds'); await features.autoBackup(inst, j); } catch (e) { LOG('auto backup: ' + e.message); }
       stage(j, 'Starting game'); await ensureMsToken(); let java, lp;
       if (inst.loader === 'rust') { lp = rustLaunch(inst); java = lp.java; if (opts && opts.join) lp.args.push('--server', String(opts.join)); }
       else { try { applySkinPack(inst); } catch (e) { LOG('skin pack: ' + e.message); } const mv = mergedVersion(inst.versionId); java = await pickJava(inst, requiredJava(mv), j); lp = buildLaunch(inst, mv, java); if (opts && opts.join) lp.args.push(...joinArgs(inst, String(opts.join))); }
       const r = { lines: [], alive: true, started: Date.now(), proc: null }; running.set(id, r); LOG(`launch ${inst.name}: ${java} ${lp.args.length} args`);
       const add = l => { r.lines.push(l); if (r.lines.length > 6000) r.lines.shift(); emitConsole(id, l); };
+      if (opts && opts.safe && inst.loader !== 'vanilla' && inst.loader !== 'rust') { try { const n = features.holdMods(inst); add(`[launcher] Safe mode: ${n} mod(s) set aside for this launch, they come back when the game closes`); } catch (e) { add('[launcher] Safe mode failed: ' + e.message); } }
       add(`[launcher] ${java}`); add(`[launcher] Minecraft ${inst.mc} / ${inst.versionId} as ${settings.username} (offline)`);
-      const pr = cp.spawn(lp.java, lp.args, { cwd: lp.cwd, windowsHide: true }); r.proc = pr;
+      { const pre = await features2.runHook(inst, inst.preCmd, 'Pre-launch', add); if (pre !== 0) { r.alive = false; throw new Error('The pre-launch command failed (exit code ' + pre + '). Its output is in the console.'); } }
+      const sp = features2.spawnSpec(inst, lp); if (sp.cmd !== lp.java) add('[launcher] Wrapper: ' + sp.cmd);
+      const pr = cp.spawn(sp.cmd, sp.args, { cwd: lp.cwd, windowsHide: true, env: sp.env }); r.proc = pr;
       const on = d => d.toString().split(/\r?\n/).filter(Boolean).forEach(add); pr.stdout.on('data', on); pr.stderr.on('data', on);
-      const fin = code => { if (!r.alive) return; r.alive = false; const dur = (Date.now() - r.started) / 1000 | 0; add(`[launcher] Game exited with code ${code}`); inst.playTime = (inst.playTime || 0) + dur; saveInst(inst); if (settings.minimizeOnLaunch && win) win.restore(); if (code !== 0 && dur < 30) send('toast', { msg: 'Game crashed on startup — open the Console tab', err: true }); pushState(); };
+      const fin = code => { if (!r.alive) return; r.alive = false; try { features.releaseMods(inst); } catch {} const dur = (Date.now() - r.started) / 1000 | 0; add(`[launcher] Game exited with code ${code}`); inst.playTime = (inst.playTime || 0) + dur; saveInst(inst); if (settings.minimizeOnLaunch && win) win.restore(); try { features.onExit(inst, r, code, dur); } catch (e) { LOG('crash helper: ' + e.message); } features2.runHook(inst, inst.postCmd, 'Post-exit', add, { INST_EXIT_CODE: String(code) }); pushState(); };
       pr.on('close', fin); pr.on('error', e => { add('[launcher] ' + e.message); fin(-1); });
       inst.lastPlayed = Date.now() / 1000 | 0; saveInst(inst); if (settings.minimizeOnLaunch && win) win.minimize();
      } catch (e) { fail(e.message || String(e)); throw e; }
     });
     busy.delete(id); pushState(); return err;
   },
-  stop(id) { const r = running.get(id); if (r && r.alive && r.proc) r.proc.kill(); },
+  stop(id) { const r = running.get(id); if (r && r.alive && r.proc) { r.stopped = true; r.proc.kill(); } },
   console: id => { const r = running.get(id); return r ? r.lines : []; },
   listContent: (id, kind) => { const i = getInst(id); return i ? listContent(i, kind) : []; },
   identify: async id => { const i = getInst(id); return i ? identifyContent(i) : false; },
@@ -912,13 +937,20 @@ const api = {
   javas: () => javas, rescanJava: () => scanJavas(),
   downloadJava: major => startJob(`Java ${major}`, j => downloadJava(major, j)),
   launcherLog: () => logLines,
-  winMin: () => win.minimize(), winMax: () => { win.isMaximized() ? win.unmaximize() : win.maximize(); }, winClose: () => win.close(), winIsMax: () => win.isMaximized(),
+  winMin: () => win.minimize(), winMax: () => {
+    if (!ROUNDED) { win.isMaximized() ? win.unmaximize() : win.maximize(); return; }
+    if (win._maxed) { if (win._restore) win.setBounds(win._restore); win._maxed = false; send('maxed', false); }
+    else { win._restore = win.getBounds(); win.setBounds(screen.getDisplayMatching(win._restore).workArea); win._maxed = true; send('maxed', true); }
+  }, winClose: () => win.close(), winIsMax: () => ROUNDED ? !!win._maxed : win.isMaximized(),
+  setWinStyle(style) { if (!['rounded', 'classic'].includes(style)) return; settings.winStyle = style; saveSettings(); app.relaunch(); app.exit(0); },
+  winGetBounds: () => win.getBounds(), winSetBounds: b => { if (!b || win._maxed || win.isMaximized() || win.isFullScreen()) return; const mw = 1000 + (ROUNDED ? 2 * WIN_M : 0), mh = 640 + (ROUNDED ? 2 * WIN_M : 0); win.setBounds({ x: Math.round(b.x), y: Math.round(b.y), width: Math.max(mw, Math.round(b.width)), height: Math.max(mh, Math.round(b.height)) }); },
 };
 
 ipcMain.handle('oc', async (e, name, ...a) => { try { return await api[name](...a); } catch (err) { LOG(`[api:${name}] ${err.message}`); throw err; } });
 
 function createWindow() {
-  win = new BrowserWindow({ width: 1320, height: 820, minWidth: 1000, minHeight: 640, frame: false, backgroundColor: '#0b0d12', show: false, title: 'OfflineCraft', icon: path.join(__dirname, 'renderer', 'logo.png'), webPreferences: { spellcheck: false, preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false } });
+  ROUNDED = wantRounded(); LOG('window style: ' + (ROUNDED ? 'rounded (transparent)' : 'classic'));
+  win = new BrowserWindow({ width: 1320 + (ROUNDED ? 2 * WIN_M : 0), height: 820 + (ROUNDED ? 2 * WIN_M : 0), minWidth: 1000 + (ROUNDED ? 2 * WIN_M : 0), minHeight: 640 + (ROUNDED ? 2 * WIN_M : 0), frame: false, transparent: ROUNDED, resizable: !ROUNDED, hasShadow: !ROUNDED, backgroundColor: ROUNDED ? '#00000000' : '#0b0d12', show: false, title: 'OfflineCraft', icon: path.join(__dirname, 'renderer', 'logo.png'), webPreferences: { spellcheck: false, preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false } });
   LOG('lifecycle: window created');
   win.setMenuBarVisibility(false);
   for (const ev of ['show', 'hide', 'closed', 'unresponsive']) win.on(ev, () => LOG('window ' + ev));
@@ -926,7 +958,7 @@ function createWindow() {
   win.webContents.on('console-message', (e, level, msg, line, src) => { if (level >= 2) LOG(`page console [${level}] ${msg} (${path.basename(src || '')}:${line})`); });
   win.webContents.on('preload-error', (e, p, err) => LOG('preload error: ' + err));
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
-  let loaded = false; win.webContents.once('did-finish-load', () => { loaded = true; setTimeout(() => { try { fs.unlinkSync(START_MARK); } catch {} if (level > 0 && settings.gpuMode !== 'software') writeJson(SAFE_FILE, { level }); }, 1500); LOG('UI loaded'); setTimeout(() => { try { fs.writeFileSync(path.join(ROOT, '.ui-ready'), String(Date.now())); } catch {} }, 120); });
+  let loaded = false; win.webContents.once('did-finish-load', () => { loaded = true; setTimeout(() => { try { features2.cli(process.argv); } catch (err) { LOG('cli: ' + err.message); } }, 1500); setTimeout(() => { try { fs.unlinkSync(START_MARK); } catch {} if (level > 0 && settings.gpuMode !== 'software') writeJson(SAFE_FILE, { level }); }, 1500); LOG('UI loaded'); setTimeout(() => { try { fs.writeFileSync(path.join(ROOT, '.ui-ready'), String(Date.now())); } catch {} }, 120); });
   setTimeout(() => { if (!loaded && level < 2 && !process.argv.includes('--oc-relaunched')) { LOG('UI not loaded after 8s - relaunching in safer graphics mode'); app.relaunch({ args: process.argv.slice(1).concat('--oc-relaunched') }); app.exit(0); } }, 8000);
   setTimeout(() => { if (!loaded) dialog.showErrorBox('OfflineCraft', 'The interface did not load within 15 seconds.\nSee data\\launcher.log for details.'); }, 15000);
   const show = () => { if (win && !win.isDestroyed() && !win.isVisible()) win.show(); };
@@ -934,8 +966,12 @@ function createWindow() {
   win.webContents.on('render-process-gone', (e, d) => LOG('renderer gone: ' + d.reason));
   win.webContents.on('did-fail-load', (e, code, desc) => { LOG('load failed: ' + desc); dialog.showErrorBox('OfflineCraft', 'UI failed to load: ' + desc); });
   win.on('maximize', () => send('maxed', true)); win.on('unmaximize', () => send('maxed', false));
+  win.on('moved', () => { if (!ROUNDED || !win._maxed) return; const d = screen.getDisplayMatching(win.getBounds()).workArea, b = win.getBounds(); if (b.x !== d.x || b.y !== d.y || b.width !== d.width || b.height !== d.height) { win._maxed = false; send('maxed', false); } });
 }
-if (require.main === module || process.versions.electron) {
+// One launcher at a time: a desktop shortcut (OfflineCraft.exe --launch "My instance") hands over to the running one.
+const SECOND_INSTANCE = !app.requestSingleInstanceLock();
+if (SECOND_INSTANCE) app.quit(); else app.on('second-instance', (e, argv) => { if (win) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); } try { features2.cli(argv); } catch (err) { LOG('cli: ' + err.message); } });
+if (!SECOND_INSTANCE && (require.main === module || process.versions.electron)) {
   app.whenReady().then(() => {
     LOG('lifecycle: app ready'); setTimeout(() => cacheMsSkins(), 1500);
     app.getGPUInfo('basic').then(i => LOG('gpu: ' + JSON.stringify((i.gpuDevice || []).map(d => ({ vendor: d.vendorId, device: d.deviceId, driver: d.driverVersion, active: d.active }))))).catch(() => {});
@@ -1060,11 +1096,15 @@ function writeProps(m) {
   for (const [k, v] of Object.entries(m.props || {})) { if (!/^[a-z0-9.-]+$/.test(k)) continue; if (!(k in cur)) order.push(k); cur[k] = String(v).replace(/[\r\n]/g, ' '); }
   fs.writeFileSync(f, '#Generated by OfflineCraft\n' + order.map(k => `${k}=${cur[k]}`).join('\n') + '\n');
 }
-async function hostInstallJar(m, j) {
-  fs.mkdirSync(hostDir(m.id), { recursive: true }); stage(j, 'Finding the server download'); let url;
+async function hostJarUrl(m) {
+  let url;
   if (m.type === 'paper') { const b = (await getJson(`https://api.papermc.io/v2/projects/paper/versions/${m.mc}/builds`)).builds.pop(); if (!b) throw new Error('No Paper build for ' + m.mc); url = `https://api.papermc.io/v2/projects/paper/versions/${m.mc}/builds/${b.build}/downloads/${b.downloads.application.name}`; }
   else if (m.type === 'fabric') { const lv = ((await getJson(`https://meta.fabricmc.net/v2/versions/loader/${m.mc}`)).find(x => x.loader.stable) || {}).loader, iv = (await getJson('https://meta.fabricmc.net/v2/versions/installer')).find(x => x.stable); if (!lv || !iv) throw new Error('No Fabric server for ' + m.mc); url = `https://meta.fabricmc.net/v2/versions/loader/${m.mc}/${lv.version}/${iv.version}/server/jar`; }
   else { if (!(await ensureVanillaJson(m.mc))) throw new Error('Unknown Minecraft version ' + m.mc); const sv = (readJson(vjsonPath(m.mc), {}).downloads || {}).server; if (!sv) throw new Error('Minecraft ' + m.mc + ' has no official server download'); url = sv.url; }
+  return url;
+}
+async function hostInstallJar(m, j) {
+  fs.mkdirSync(hostDir(m.id), { recursive: true }); stage(j, 'Finding the server download'); const url = await hostJarUrl(m);
   stage(j, 'Downloading the server'); await download(url, path.join(hostDir(m.id), 'server.jar'), j);
 }
 async function hostClosePort(rt, port) { if (rt && rt.upnp && rt.upnp.ok && rt.upnp.svc) { await upnpClose(rt.upnp.svc, port); rt.upnp = null; } }
@@ -1119,6 +1159,39 @@ Object.assign(api, {
   async hostTest(id) { const m = hostMeta(id), ip = await publicIp(); if (!ip) return { err: 'Could not find your public IP (no internet?)' }; try { const j = await getJson(`https://api.mcsrvstat.us/3/${ip}:${hostPort(m)}`); return { ip, port: hostPort(m), online: !!j.online }; } catch (e) { return { err: 'The test service did not answer: ' + e.message }; } },
   hostFirewall(id) { const m = hostMeta(id), port = hostPort(m); cp.spawn('powershell', ['-NoProfile', '-Command', `Start-Process netsh -Verb RunAs -ArgumentList 'advfirewall firewall add rule name="OfflineCraft server ${port}" dir=in action=allow protocol=TCP localport=${port}'`], { windowsHide: true, detached: true }).on('error', () => {}); return true; },
 });
+
+// ================= public server discovery (BattleMetrics public API, no key needed) =================
+const BM = process.env.OC_BM_BASE || 'https://api.battlemetrics.com';
+async function bmGet(url) {
+  if (!url.startsWith(BM + '/')) throw new Error('Unexpected server list address');
+  let r; try { r = await fetch(url, { headers: { 'User-Agent': UA, Accept: 'application/json' }, signal: AbortSignal.timeout(20000) }); } catch { throw new Error('Could not reach the server list (are you online?)'); }
+  if (r.status === 429) throw new Error('The server list is busy right now. Try again in a minute.');
+  if (!r.ok) { const e = new Error(`The server list answered with an error (${r.status})`); e.status = r.status; throw e; }
+  return r.json();
+}
+Object.assign(api, {
+  // One page of online public Minecraft servers. Pass the returned `next` back in to load more.
+  async srvDiscover({ search, sort, country, next } = {}) {
+    let url;
+    if (next) url = String(next);
+    else {
+      const q = new URLSearchParams({ 'filter[game]': 'minecraft', 'filter[status]': 'online', 'page[size]': '30' });
+      if (search && String(search).trim()) q.set('filter[search]', String(search).trim().slice(0, 60));
+      if (/^[A-Za-z]{2}$/.test(country || '')) q.set('filter[countries]', country.toUpperCase());
+      url = `${BM}/servers?${q}`; if (sort === 'players') url += '&sort=-players'; else if (sort === 'rank') url += '&sort=rank';
+    }
+    let j; try { j = await bmGet(url); } catch (e) { if (e.status === 400 && /[?&]sort=/.test(url)) j = await bmGet(url.replace(/&sort=[^&]*/, '')); else throw e; }
+    const servers = (j.data || []).map(d => { const a = d.attributes || {}, host = String(a.address || a.ip || '').trim(), port = parseInt(a.port) || 0, det = a.details || {};
+      return { id: 'bm' + d.id, name: String(a.name || host).slice(0, 80), host, port: port === 25565 ? 0 : port, players: a.players | 0, max: a.maxPlayers | 0, country: /^[A-Za-z]{2}$/.test(a.country || '') ? a.country.toUpperCase() : '', rank: a.rank | 0, version: typeof det.version === 'string' ? det.version.slice(0, 20) : '' };
+    }).filter(x => x.host && /^[\w.\-:]+$/.test(x.host) && !isPrivateHost(x.host));
+    return { servers, next: (j.links && j.links.next) || '' };
+  },
+});
+function isPrivateHost(h) { return /^(localhost|127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|0\.|::1)/.test(h); }
+
 app.on('before-quit', () => { for (const [, r] of hosted) if (r.proc && r.state !== 'stopped') { try { r.proc.stdin.write('stop\n'); } catch {} } });
 
+const features = require('./features.js').install({ api, S: () => settings, P, getInst, saveInst, instDir, gameDir, contentDir, startJob, stage, send, LOG, readJson, writeJson, exists, fsize, sanitize, pushState, running, MR, fetchRetry, primaryFile, download, runPrepare, listLoaderVersions, ensureVanillaJson, rustVersions, RUST, updateMods, dialog, shell, clipboard, nativeImage, getWin: () => win, pathToFileURL, instances: () => instances });
+features.restoreHolds();
+const features2 = require('./features2.js').install({ api, S: () => settings, P, ROOT, getInst, saveInst, instDir, gameDir, startJob, stage, send, LOG, readJson, writeJson, exists, fsize, sanitize, pushState, running, makeInstance, runPrepare, listLoaderVersions, dialog, shell, app, getWin: () => win, decTok, ensureMsToken, instances: () => instances, pathToFileURL });
 module.exports = { _srv: { mcPing, mcProbe, serverStatus, upnpService, upnpSoap, joinArgs, cacheMsSkins, varint, mcPacket, mcStr },  _skins: { applySkinPack, savePng, packFormat }, _ms: { msChain, msTokenRequest, ensureMsToken, encTok, decTok }, _getSettings: () => settings, rulesOk, mergedVersion, collectLibs, buildLaunch, offlineUuid, mavenPath, _setSettings: s => { settings = s; } };

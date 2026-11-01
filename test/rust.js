@@ -1,6 +1,6 @@
 const fs = require('fs'), path = require('path'), cp = require('child_process'), crypto = require('crypto'), assert = require('assert'), os = require('os');
 const AdmZip = require('adm-zip');
-const src = fs.readFileSync('/home/claude/src/main.js', 'utf8');
+const src = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
 const block = src.slice(src.indexOf('// ---------------- Rust loader'), src.indexOf('// ---------------- prepare / launch'));
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'oc-')); const P = (...a) => path.join(ROOT, ...a);
 const sanitize = s => s.replace(/[<>:"/\\|?*]/g, '_');
