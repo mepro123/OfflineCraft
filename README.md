@@ -1,18 +1,18 @@
-# Build OfflineCraft (Windows)
+# Build OfflineCraft (Tauri, Windows)
 
-1. Install Node.js LTS from https://nodejs.org
-2. Open a terminal in this folder and run:
+1. Install Rust (https://rustup.rs), Node.js LTS, and the "Desktop development with C++" Build Tools (needed by Rust on Windows).
+2. In this folder:
 
        npm install
-       npm start          (test it)
-       npm run build      (make the exe)
+       npm start          (dev run)
+       npm run build      (release build -> dist\OfflineCraft-win32-x64)
+       npm test           (Rust unit tests)
 
-3. Your app is in `dist\OfflineCraft-win32-x64\OfflineCraft.exe`.
-   Zip that whole folder to share it.
+The UI is the unchanged `renderer/` folder; `renderer/tauri-shim.js` provides `window.oc` on top of Tauri.
+The backend is `src-tauri/src/*.rs` (port of main.js, features.js, features2.js).
+The splash launcher (`launcher/`) is unchanged: `OfflineCraft.exe` = splash, `OfflineCraft-app.exe` = the Tauri app.
 
-
-## Instant splash screen
-`npm run build` also installs a tiny native launcher (`launcher/`). The file you double-click is the launcher (`OfflineCraft.exe`): it shows an animated splash immediately and starts the real app (`OfflineCraft-app.exe`). To change the splash, edit `launcher/splash.cpp` and rebuild it with MinGW:
-
-    x86_64-w64-mingw32-windres icon.rc -O coff -o icon.o
-    x86_64-w64-mingw32-g++ -O2 -std=c++17 -DUNICODE -D_UNICODE -mwindows -municode -static splash.cpp icon.o -o OfflineCraft-launcher.exe -lgdiplus -lshlwapi -lole32 -luuid -lgdi32 -luser32 -ladvapi32 -s
+## Notes
+- Existing Microsoft logins from the Electron build must be redone once (Electron's encrypted tokens are unreadable here). Tokens are now protected with Windows DPAPI.
+- Debug aid: set `OC_SELFTEST=<file.json>` (a list of `{"n":"apiName","a":[args]}`) to run backend calls after the UI loads; results go to `data/launcher.log`.
+- Graphics fallback levels map to WebView2 flags via `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`.
