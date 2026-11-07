@@ -1,0 +1,19 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "OfflineCraft",
+  "version": "3.0.0",
+  "identifier": "dev.offlinecraft.launcher",
+  "build": { "frontendDist": "../renderer" },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data: blob: https: http://asset.localhost asset:; media-src 'self' blob: http://asset.localhost asset:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost",
+      "assetProtocol": { "enable": true, "scope": ["**"] }
+    }
+  },
+  "bundle": {
+    "active": false,
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.png", "icons/icon.ico"]
+  }
+}
